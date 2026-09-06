@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Avatar Reader",
+  "version": "0.1.0",
+  "description": "Open the Avatar Reader (PDF narrated by a lip-synced 3D avatar) in Chrome's side panel.",
+  "minimum_chrome_version": "114",
+  "action": {
+    "default_title": "Open Avatar Reader",
+    "default_icon": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+  },
+  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" },
+  "background": { "service_worker": "background.js" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "permissions": ["sidePanel"],
+  "host_permissions": ["http://localhost:3000/*"]
+}

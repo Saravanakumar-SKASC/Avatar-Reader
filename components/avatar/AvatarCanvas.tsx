@@ -1,13 +1,16 @@
 'use client';
 
-import { Component, Suspense, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Component, Suspense, useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import type { Avatar } from '@/types/avatar';
+import type { Viseme } from '@/types/tts';
 import { useBlink } from './useBlink';
+import { useLipSync, type LipSyncSource } from './useLipSync';
+import { MOUTH_OPENNESS } from './lipsync';
 
 /** Subtle breathing bob + sway so the avatar never looks frozen. */
 function useIdle(group: React.RefObject<THREE.Group>) {
@@ -30,8 +33,9 @@ function useIdle(group: React.RefObject<THREE.Group>) {
 function FaceCamera({ headY, distance }: { headY: number; distance: number }) {
   const camera = useThree((s) => s.camera);
   useEffect(() => {
-    camera.position.set(0, headY + 0.02, distance);
-    camera.lookAt(0, headY, 0);
+    // Eye line sits a little above centre; shoulders fill the lower third.
+    camera.position.set(0, headY - 0.02, distance);
+    camera.lookAt(0, headY - 0.07, 0);
     camera.updateProjectionMatrix();
   }, [camera, headY, distance]);
   return null;
@@ -50,18 +54,20 @@ function eyeHeight(vrm: VRM): number {
 
 // ---------- Real VRM ----------
 
-function VrmModel({ vrm }: { vrm: VRM }) {
+function VrmModel({ vrm, lipSync }: { vrm: VRM; lipSync: LipSyncSource }) {
   const group = useRef<THREE.Group>(null);
   const [headY] = useState(() => eyeHeight(vrm));
   useIdle(group);
 
   useBlink((w) => vrm.expressionManager?.setValue('blink', w));
+  useLipSync(lipSync, (shape, w) => vrm.expressionManager?.setValue(shape, w));
 
+  // Must run after the blink/lip-sync frames above: vrm.update applies expression weights.
   useFrame((_, delta) => vrm.update(delta));
 
   return (
     <>
-      <FaceCamera headY={headY} distance={0.75} />
+      <FaceCamera headY={headY} distance={0.9} />
       <primitive ref={group} object={vrm.scene} />
     </>
   );
@@ -69,11 +75,24 @@ function VrmModel({ vrm }: { vrm: VRM }) {
 
 // ---------- Placeholder (no .vrm on disk yet) ----------
 
-function PlaceholderModel({ avatar }: { avatar: Avatar }) {
+function PlaceholderModel({ avatar, lipSync }: { avatar: Avatar; lipSync: LipSyncSource }) {
   const group = useRef<THREE.Group>(null);
   const leftEye = useRef<THREE.Mesh>(null);
   const rightEye = useRef<THREE.Mesh>(null);
+  const mouth = useRef<THREE.Mesh>(null);
+  const mouthWeights = useRef<Record<string, number>>({});
   useIdle(group);
+
+  useLipSync(lipSync, (shape, w) => {
+    mouthWeights.current[shape] = w;
+    if (!mouth.current) return;
+    // blend openness across shapes so transitions stay smooth
+    let open = 0;
+    for (const [name, weight] of Object.entries(mouthWeights.current)) {
+      open += weight * (MOUTH_OPENNESS[name as keyof typeof MOUTH_OPENNESS] ?? 0);
+    }
+    mouth.current.scale.y = 0.15 + Math.min(open, 1) * 0.85;
+  });
 
   useBlink((w) => {
     const scale = Math.max(0.05, 1 - w);
@@ -83,7 +102,7 @@ function PlaceholderModel({ avatar }: { avatar: Avatar }) {
 
   return (
     <group ref={group}>
-      <FaceCamera headY={1.4} distance={1.4} />
+      <FaceCamera headY={1.4} distance={1.6} />
       {/* body */}
       <mesh position={[0, 0.55, 0]}>
         <boxGeometry args={[0.7, 0.9, 0.4]} />
@@ -103,9 +122,14 @@ function PlaceholderModel({ avatar }: { avatar: Avatar }) {
         <sphereGeometry args={[0.045, 16, 16]} />
         <meshStandardMaterial color="#1f2937" />
       </mesh>
+      {/* mouth: scales in y from a thin line (closed) to a full box (aa) */}
+      <mesh ref={mouth} position={[0, 1.24, 0.29]} scale={[1, 0.15, 1]}>
+        <boxGeometry args={[0.14, 0.08, 0.04]} />
+        <meshStandardMaterial color="#7f1d1d" />
+      </mesh>
       <Html position={[0, 1.85, 0]} center>
         <div className="whitespace-nowrap rounded bg-black/60 px-2 py-0.5 text-xs text-white">
-          {avatar.name} · placeholder
+          {avatar.name} · no 3D model
         </div>
       </Html>
     </group>
@@ -116,7 +140,7 @@ function PlaceholderModel({ avatar }: { avatar: Avatar }) {
 
 type LoadState = { status: 'loading' } | { status: 'vrm'; vrm: VRM } | { status: 'placeholder' };
 
-function AvatarModel({ avatar }: { avatar: Avatar }) {
+function AvatarModel({ avatar, lipSync }: { avatar: Avatar; lipSync: LipSyncSource }) {
   const [state, setState] = useState<LoadState>({ status: 'loading' });
 
   useEffect(() => {
@@ -161,12 +185,15 @@ function AvatarModel({ avatar }: { avatar: Avatar }) {
   if (state.status === 'loading') {
     return (
       <Html center>
-        <div className="text-xs text-gray-300">Loading {avatar.name}…</div>
+        <div className="flex flex-col items-center gap-2 text-xs text-gray-300">
+          <span className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-white" />
+          Loading {avatar.name}…
+        </div>
       </Html>
     );
   }
-  if (state.status === 'vrm') return <VrmModel vrm={state.vrm} />;
-  return <PlaceholderModel avatar={avatar} />;
+  if (state.status === 'vrm') return <VrmModel vrm={state.vrm} lipSync={lipSync} />;
+  return <PlaceholderModel avatar={avatar} lipSync={lipSync} />;
 }
 
 // ---------- WebGL availability + error containment ----------
@@ -214,14 +241,26 @@ class CanvasErrorBoundary extends Component<
 
 // ---------- Public component ----------
 
-export default function AvatarCanvas({ avatar, className }: { avatar: Avatar; className?: string }) {
+export default function AvatarCanvas({
+  avatar,
+  className,
+  visemes,
+  audioRef,
+}: {
+  avatar: Avatar;
+  className?: string;
+  /** Rhubarb cues for the audio currently in `audioRef`; [] = mouth at rest. */
+  visemes: Viseme[];
+  audioRef: RefObject<HTMLAudioElement | null>;
+}) {
+  const lipSync: LipSyncSource = { visemes, audioRef };
   const [webgl, setWebgl] = useState<boolean | null>(null);
   useEffect(() => setWebgl(webglAvailable()), []);
 
   const noWebgl = (
     <Unavailable
       avatar={avatar}
-      reason="3D preview needs WebGL. Open this page in Chrome, Safari or Firefox with hardware acceleration on."
+      reason="3D needs WebGL. Open in Chrome, Safari or Firefox with hardware acceleration on."
     />
   );
 
@@ -236,7 +275,7 @@ export default function AvatarCanvas({ avatar, className }: { avatar: Avatar; cl
             <directionalLight position={[2, 4, 3]} intensity={1.2} />
             <Suspense fallback={null}>
               {/* key forces a clean remount when the avatar changes */}
-              <AvatarModel key={avatar.id} avatar={avatar} />
+              <AvatarModel key={avatar.id} avatar={avatar} lipSync={lipSync} />
             </Suspense>
           </Canvas>
         </CanvasErrorBoundary>

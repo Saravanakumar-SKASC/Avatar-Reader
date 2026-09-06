@@ -50,7 +50,7 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const visemes = await extractVisemes(audio);
+    const visemes = await extractVisemes(audio, text);
     const res: SpeakResponse = {
       audioBase64: audio.toString('base64'),
       visemes,

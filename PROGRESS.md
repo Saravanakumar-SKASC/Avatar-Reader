@@ -310,3 +310,337 @@
 - `app/api/speak/route.ts`, `lib/avatars.ts`, `lib/tts/piper.ts`, `types/tts.ts`,
   `app/(reader)/read/[bookId]/page.tsx`
 - `components/avatar/VoiceOverride.tsx`, `tests/avatars.test.ts` (new)
+
+## 2026-09-06 — Phase 6: Lip-sync from Rhubarb visemes
+
+**What was built**
+- `components/avatar/lipsync.ts` — `RHUBARB_TO_VRM` (X/A→neutral, B/G→ih, C→ee, D/H→aa,
+  E→oh, F→ou), `VRM_MOUTH_SHAPES`, `activeShapeAt(visemes, t)` (Rhubarb cues are
+  `[start, end)` ranges in seconds), `MOUTH_OPENNESS` per shape for the placeholder.
+- `components/avatar/useLipSync.ts` — generic `useFrame` driver: reads the playing
+  `<audio>`'s `currentTime`, picks the active shape, eases each of the 5 vowel weights toward
+  1/0 (`delta * 12` smoothing), and hands `(shape, weight)` to an `apply` callback. Reads
+  `currentTime` only while the element is playing; after `ended` it treats time as ∞ so the
+  mouth relaxes; with no element/cues it stays neutral.
+- `AvatarCanvas` — takes `visemes` + `audioRef`. `VrmModel` applies weights via
+  `expressionManager.setValue(shape, w)`, registered *before* the `vrm.update(delta)` frame
+  (three-vrm applies expression weights inside `update`). The placeholder gained a box mouth
+  whose height blends `MOUTH_OPENNESS` across the smoothed weights, so lip-sync is visible
+  even before a `.vrm` exists. Works for whichever avatar is loaded — nothing hardcoded.
+- Blinking stays on the existing `useBlink` (render-loop, overlap-proof) rather than the
+  `setTimeout` blink in the reference loop, per the Phase 4 guard requirement.
+- Reader page — stores the `visemes` from `/api/speak`, assigns `audioRef.current` before
+  publishing the cues so the loop always reads the right element's clock, and passes both to
+  `AvatarCanvas`. Cues are cleared when a new Play starts.
+- `tests/lipsync.test.ts` — range boundaries (inclusive start / exclusive end), neutral
+  outside cues and for unknown letters, every Rhubarb letter maps to a valid shape.
+
+**Verified**
+- `npm run build` (isolated copy) clean; `next lint` clean; `npm test` → 10 passing;
+  `/read/<id>` 200 on the dev server.
+- Not verified visually (no browser automation): mouth motion in sync with audio.
+
+**Files changed**
+- `components/avatar/lipsync.ts`, `components/avatar/useLipSync.ts`, `tests/lipsync.test.ts` (new)
+- `components/avatar/AvatarCanvas.tsx`, `app/(reader)/read/[bookId]/page.tsx`
+
+**How to verify**
+- Open a book with Alex (real VRM), press Play: mouth shapes change with the speech and
+  settle closed when audio ends; blinking continues independently throughout.
+- Switch to any placeholder avatar and press Play: the red box mouth opens/closes in time.
+- Press Play again mid-speech: old audio stops, mouth resets, new cues drive the new audio.
+
+## 2026-09-06 — Phase 7: Supabase auth + persistence
+
+**What was built**
+- `supabase/migrations/0001_init.sql` — `books`, `reading_progress`, `bookmarks` exactly as
+  specified, RLS enabled with one owner policy each (`auth.uid() = user_id` for
+  using/with-check), plus a private `books` storage bucket with an owner-folder policy
+  (`<user_id>/…`). Run it in the SQL editor.
+- `@supabase/ssr` added. `lib/supabase/{env,client,server,middleware}.ts`: browser client,
+  server (cookies) client, and `updateSession` used by root `middleware.ts` — refreshes the
+  auth cookie on every request, redirects signed-out users from `/upload` and `/read/*` to
+  `/login?next=…`, and signed-in users away from `/login`. Anon key only; no service role.
+- Auth: `app/(auth)/login/page.tsx` (email+password sign-in / sign-up toggle, "Continue with
+  Google" via `signInWithOAuth`), `app/auth/callback/route.ts` (exchanges the OAuth /
+  email-confirmation `code` for a session), `components/library/SignOutButton.tsx`.
+- `app/(reader)/layout.tsx` — server-side auth gate (`getUser()`), renders the Library
+  sidebar beside `/upload` and `/read/*`. Shows a "Supabase is not configured" notice when
+  env vars are empty instead of crashing.
+- `components/library/LibrarySidebar.tsx` — server component: user's books (newest first)
+  with a progress bar and reading % = `current_page / page_count`, upload link, sign-out.
+- `lib/books.ts` (replaces `lib/book-store.ts` / localStorage): `createBook` inserts the
+  row, uploads `<uid>/<book_id>.pdf` and `<uid>/<book_id>.pages.json` (the extracted text —
+  the spec'd schema has no column for it, so it lives in Storage beside the PDF), sets
+  `file_path`; `loadBook`, `loadProgress`, `saveProgress` (DB is 1-based, UI 0-based).
+- Reader page — loads book + progress from Supabase, opens at the saved page, saves on
+  page flip (500 ms debounce) and immediately on unmount / `pagehide`. Books saved in
+  localStorage by earlier phases are no longer reachable (re-upload).
+- `SETUP.md` — Supabase section: project, migration, redirect URLs, email confirmation,
+  Google OAuth client setup.
+- `bookmarks` table exists with RLS; no UI yet (not requested).
+
+**Verified**
+- `npm run build` (isolated copy) clean — routes: `/login` static, `/upload`, `/read/[bookId]`,
+  `/auth/callback` dynamic, middleware active. `next lint` clean. `npm test` 10 passing.
+- Dev server with empty Supabase env: `/upload`, `/read/x`, `/login` render the
+  "not configured" notice (200) rather than erroring.
+- **Not verified end-to-end**: no Supabase project exists yet (env empty), so sign-in,
+  RLS, uploads, sidebar data and progress saving are untested against a real backend.
+
+**Files changed**
+- New: `supabase/migrations/0001_init.sql`, `middleware.ts`, `lib/supabase/env.ts`,
+  `lib/supabase/client.ts`, `lib/supabase/server.ts`, `lib/supabase/middleware.ts`,
+  `lib/books.ts`, `types/database.ts`, `app/(auth)/login/page.tsx`,
+  `app/auth/callback/route.ts`, `app/(reader)/layout.tsx`,
+  `components/library/LibrarySidebar.tsx`, `components/library/SignOutButton.tsx`
+- Changed: `app/(reader)/upload/page.tsx`, `app/(reader)/read/[bookId]/page.tsx`,
+  `types/book.ts`, `SETUP.md`, `package.json`
+- Removed: `lib/book-store.ts`, `lib/supabase/.gitkeep`
+
+**How to verify (after SETUP.md Supabase steps)**
+- Visit `/upload` signed out → redirected to `/login`. Sign up with email (confirm link →
+  `/auth/callback` → `/upload`), or Continue with Google.
+- Upload a PDF → row in `books`, two objects in Storage `books/<uid>/`, sidebar lists it at 0%.
+- Flip pages, reload → reopens on the same page; sidebar % updates. Close the tab mid-read
+  and reopen → position kept.
+- Second account cannot see the first account's books (RLS).
+
+## 2026-09-06 — Phase 7 follow-up: publishable-key env name
+
+**What changed**
+- Supabase's Connect dialog now hands out `sb_publishable_…` keys, and the user saved one as
+  `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`; the app only read `NEXT_PUBLIC_SUPABASE_ANON_KEY`,
+  hence the "not configured" notice. `lib/supabase/env.ts` now accepts either name
+  (publishable key is a drop-in for the anon JWT). `.env.local.example` and `SETUP.md` updated.
+
+**Verified against the live project**
+- REST: `books`, `reading_progress`, `bookmarks` all answer 200 → migration applied.
+- Auth settings: email enabled, email confirmation ON, Google provider OFF (needs a Google
+  OAuth client + enabling in the dashboard; see SETUP.md step 5).
+- Dev server: `/upload` and `/read/*` now 307 → `/login?next=…`; `/login` 200.
+- Not yet verified: storage bucket (hidden from unauthenticated probes), sign-up →
+  callback → upload → progress flow. Needs a real sign-in.
+
+**Files changed**
+- `lib/supabase/env.ts`, `.env.local.example`, `SETUP.md`
+
+## 2026-09-06 — Chrome extension (side-panel wrapper) + narrow-layout support
+
+**What was built**
+- `extension/` — Manifest V3 extension (Chrome 114+). Toolbar icon opens the side panel
+  (`sidePanel.setPanelBehavior({ openPanelOnActionClick: true })`); `sidepanel.html` frames
+  the running app at `APP_URL` (`config.js`, default `http://localhost:3000`). Pings
+  `/login` first and shows a "start the app: npm run dev" notice if unreachable. Buttons:
+  ↻ reload, ⧉ open in a popup window (via `background.js`) — required for Google sign-in,
+  which refuses to run in a frame. `host_permissions` for the app URL makes Chrome treat the
+  framed app as first-party so Supabase auth cookies work inside the panel. Solid-colour
+  PNG icons generated with a pure-python encoder. `extension/README.md` has load/deploy steps.
+- App changes so it's usable in a ~400 px panel:
+  - `components/library/ReaderShell.tsx` — Library sidebar is static on `lg+`, and a
+    "☰ Library" slide-over below that. `app/(reader)/layout.tsx` uses it.
+  - `components/book/ScaleToFit.tsx` — CSS-transform scales the fixed 960×640 two-page
+    flip-book down to the container width (ResizeObserver). Reader page wraps
+    `BookViewer` in it; avatar canvas is 320 px tall / full-width on narrow screens,
+    side-by-side layout only from `xl`.
+- Verified: `/login` sends no `X-Frame-Options` / CSP `frame-ancestors`, so framing works.
+  `npm run build` (isolated) clean, `tsc` + `lint` clean, manifest JSON valid, extension
+  scripts pass `node --check`. Not verified: loading the extension in Chrome (no browser here).
+
+**Files changed**
+- New: `extension/{manifest.json,config.js,background.js,sidepanel.html,sidepanel.css,sidepanel.js,README.md,icons/*}`,
+  `components/library/ReaderShell.tsx`, `components/book/ScaleToFit.tsx`
+- Changed: `app/(reader)/layout.tsx`, `app/(reader)/read/[bookId]/page.tsx`, `app/(reader)/upload/page.tsx`
+
+**How to verify**
+- `npm run dev`; `chrome://extensions` → Developer mode → Load unpacked → `extension/`.
+  Click the icon: side panel shows the login page. Sign in with email, upload, read.
+- Stop the dev server, press ↻ → "app isn't running" notice. Start it, ↻ → app returns.
+- Click ⧉ → app opens in a 1280×900 popup window; Google sign-in works there.
+- Drag the panel wider/narrower: the book scales; ☰ Library opens the sidebar as a slide-over.
+
+## 2026-09-06 — Local mode (no Supabase) + demo book
+
+**Why**
+- User doesn't want to add a payment method to Google Cloud / Supabase. Local mode makes
+  the app fully usable with zero accounts; the Supabase path stays in the code, unused.
+
+**What was built**
+- `NEXT_PUBLIC_LOCAL_MODE=true` (set in `.env.local`, documented in `.env.local.example`).
+  `isLocalMode()` in `lib/supabase/env.ts` is true when the flag is set *or* Supabase isn't
+  configured. `middleware.ts` does no auth gating in local mode and sends `/login` → `/upload`.
+- `lib/books/` — one `BookStore` interface, two implementations: `local.ts` (localStorage:
+  `avatar-reader:books` index, `avatar-reader:book:<id>` pages, `avatar-reader:progress:<id>`
+  1-based page; fires `avatar-reader:books-changed` on writes) and `supabase.ts` (the Phase 7
+  code, unchanged). `index.ts` exports whichever is active — the upload/reader pages didn't
+  change their imports. Local mode keeps only extracted text, not the PDF bytes.
+- `components/library/LocalLibrarySidebar.tsx` — client sidebar: books newest first with
+  reading %, live-updates via the change event (and `storage` for other tabs), hover ×
+  to remove a book. `app/(reader)/layout.tsx` picks it in local mode; no `getUser()` call.
+- `/login` in local mode shows a "no account needed" note (middleware normally redirects
+  before it renders).
+- Demo: `public/demo/lighthouse.pdf` — a 4-page original short story generated with a
+  pure-python PDF writer (Times, headings, page footers). Upload page has "▶ Try the demo
+  book" which fetches it and runs the normal extract → save → open flow.
+
+**Verified**
+- `npm run build` (isolated) clean; `tsc` + `lint` clean; `npm test` 10 passing.
+- Dev server: `/upload` 200 (no redirect), `/login` 307 → `/upload`, `/read/x` 200,
+  `/demo/lighthouse.pdf` 200; `/api/extract` on the demo → 4 pages with correct text.
+- Not verified in a browser: localStorage writes, sidebar live update, demo button click.
+
+**Files changed**
+- New: `lib/books/{types,local,supabase,index}.ts`, `components/library/LocalLibrarySidebar.tsx`,
+  `public/demo/lighthouse.pdf`
+- Changed: `lib/supabase/env.ts`, `lib/supabase/middleware.ts`, `app/(reader)/layout.tsx`,
+  `app/(reader)/upload/page.tsx`, `app/(auth)/login/page.tsx`, `.env.local.example`,
+  `.env.local` (local only)
+- Removed: `lib/books.ts` (split into `lib/books/`)
+
+**How to verify**
+- Open http://localhost:3000 → lands on `/upload` with the "Local mode" note.
+- Click "▶ Try the demo book" → reader opens "The Lighthouse at Marrow Point" (4 pages),
+  sidebar lists it at 25%. Flip to page 3, reload → still on page 3, sidebar shows 75%.
+- Upload your own PDF → appears at the top of the sidebar. Hover a book → × removes it.
+- Chrome extension side panel works unchanged (no sign-in step now).
+
+## 2026-09-06 — Reader interaction polish (single-route upload, reactive playback, play/pause)
+
+**What changed**
+1. **Upload is inline.** `components/book/UploadDropzone.tsx` (drag-drop / click / demo button)
+   runs extract → save and hands the loaded book to the reader via a callback. `/read/new`
+   shows it full-page when no book is loaded; "Open another PDF" shows it as a modal over a
+   loaded book. Opening a book sets state and `history.replaceState('/read/<id>')` — no
+   navigation, no remount. `/`, `/upload`, sidebars, login/callback and the extension all
+   point at `/read/new` now; `/upload` is a redirect for old links.
+2. **Selecting an avatar reads the current page.** `selectAvatar` sets `avatarId` and, if a
+   book is open, arms playback (`playRequest` 0 → 1). With no book it only changes the model.
+3. **Play/Pause toggle.** One button: Play / ⏸ Pause / ▶ Resume / Loading…. It only toggles the
+   loaded `<audio>` (`pause()` / `play()`, resuming from `currentTime`) and never fetches;
+   it arms/retries playback only when nothing is loaded for the current combo. Space bar
+   toggles too. `useLipSync` now returns the mouth to neutral whenever the element is paused,
+   ended or absent (previously a paused clip could freeze on its first cue).
+4. **Avatar switch mid-play** and 5. **page flip mid-play** are both handled by one effect:
+   `(book.id, currentPage, avatarId, voiceOverride)` is the single source of truth. On any
+   change the effect (a) aborts the in-flight `/api/speak` via `AbortController`, (b) bumps a
+   request id so a late response is ignored even if it resolves, (c) stops + detaches the
+   current `<audio>` (handlers nulled first so its `pause` event can't flip UI state),
+   (d) serves the new combo from an in-memory session cache or fetches it, (e) starts it.
+   Old/new audio can't overlap because (c) always precedes (e) synchronously.
+- Session cache: `Map<"bookId:page:avatarId:voice", clip>` — repeat visits to a page/voice are
+  instant and free. The status line shows "· cached". This is per-tab memory; the persistent
+  Supabase Storage cache from CLAUDE.md rule 2 is still outstanding (local mode has no Storage).
+- Reading-position persistence now keys on `book.id` (not the route param) so it works for
+  books opened inline.
+- Status line, voice override, keyboard arrows, WebGL fallback: unchanged.
+
+**Verified**
+- `npm run build` (isolated) clean; `tsc` + `lint` clean; `npm test` 10 passing.
+- Dev server: `/` and `/upload` → 307 `/read/new`; `/read/new` and `/read/<unknown>` 200 with
+  the drop-zone rendered; no stale `/upload` links in app/components/lib/extension.
+- Not verified (needs a browser): the race/overlap behaviour, pause-resume position, autoplay.
+
+**Files changed**
+- New: `components/book/UploadDropzone.tsx`
+- Rewritten: `app/(reader)/read/[bookId]/page.tsx`
+- Changed: `components/avatar/useLipSync.ts`, `app/(reader)/upload/page.tsx` (redirect),
+  `app/page.tsx`, `app/(auth)/login/page.tsx`, `app/auth/callback/route.ts`,
+  `components/library/LibrarySidebar.tsx`, `components/library/LocalLibrarySidebar.tsx`,
+  `lib/supabase/middleware.ts`, `extension/sidepanel.js`
+
+**How to test manually**
+- Open http://localhost:3000 → lands on `/read/new` with the drop-zone. Drop a PDF or click
+  "Try the demo book" → the reader appears in place, URL becomes `/read/<id>`, no reload.
+- Click an avatar card → the current page starts reading in that voice (first time: a few
+  seconds of "Loading…").
+- Click ⏸ Pause → audio stops, mouth relaxes. Click ▶ Resume → continues from the same spot.
+- While playing, click a different avatar → old audio stops instantly, model swaps, same page
+  starts in the new voice; never two voices at once. Rapidly click several avatars → only
+  the last one ends up playing.
+- While playing, press Next (or drag a page) → old audio stops, new page starts reading in the
+  current avatar. Flip back → instant (cached).
+- "Open another PDF" → modal drop-zone; loading a book swaps it in place.
+
+## 2026-09-06 — Final phase: production polish + screenshot fixes
+
+**Screenshot / UX fixes**
+- **Sidebar "+ Upload PDF" did nothing** after a book had been opened inline (the reader had
+  rewritten the URL with `replaceState`, so a Link to `/read/new` looked like a no-op to the
+  router). It is now `components/library/UploadButton.tsx`: dispatches a cancelable
+  `avatar-reader:open-upload` event; a mounted reader opens its drop-zone modal and cancels
+  it, otherwise the button navigates. Switching books via the sidebar resets playback.
+- Removed on-screen storage explanations ("Local mode · stored in this browser", drop-zone
+  note). Status line shortened to avatar · engine.
+- **Avatar framing**: camera now sits at eye height and looks slightly below the eyes
+  (VRM distance 0.9 m, placeholder 1.6 m), so head + shoulders sit centred; canvas is
+  400×640 next to the book on wide screens (matches book height), 360×360 stacked otherwise.
+- **First play speed**: pages are split into sentence chunks (`lib/tts/chunk.ts`; first chunk
+  ~110 chars, then ~240). Chunk 1 plays as soon as it returns (~3–5 s, Fish latency) while
+  the rest generate 2-at-a-time; the next page is prefetched once the current one is fetched.
+  Rhubarb now defaults to the `phonetic` recogniser (`RHUBARB_RECOGNIZER=pocketSphinx` to
+  revert) and receives the dialog text. Clips persist in **IndexedDB** (+ memory) keyed by
+  book/page/chunk/avatar/voice/text-hash (`lib/clip-cache.ts`) → repeat plays are instant
+  across reloads and never re-spend TTS quota (CLAUDE.md rule 2, browser edition).
+- **Pause + word highlighting**: `BookViewer` renders each page as word spans (memoised
+  `BookPage`, `renderOnlyPageLengthChange` so page-flip isn't re-initialised on highlight
+  changes). The reader tracks the playing chunk's `currentTime / duration`, maps it to a word
+  via character-weighted fractions, and highlights it (amber) with `scrollIntoView`. Pause
+  freezes the highlight and relaxes the mouth; Resume continues from the same word.
+- **Background**: warm animated gradient (`.warm-bg` in `globals.css`: two blurred amber /
+  rose-violet blobs drifting on 30 s / 38 s loops; disabled under `prefers-reduced-motion`).
+  Sidebar is translucent with backdrop blur.
+
+**Spec items**
+1. Loading states — PDF extraction: spinner in the drop-zone ("Extracting text…" /
+   "Saving…"); TTS: button shows "Loading…" + "Preparing audio n/N" with spinner while
+   chunks generate/buffer; avatar model: spinner + "Loading <name>…" in the canvas; book
+   load: spinner.
+2. Errors — failed upload: inline red message in the drop-zone (non-PDF rejected client-side);
+   TTS failure on both engines: red card with both engines' messages and a **Retry** button;
+   missing `.vrm`: placeholder figure labelled "<name> · no 3D model"; WebGL missing:
+   in-panel fallback; React error boundaries `app/error.tsx` and `app/(reader)/error.tsx`
+   (Try again / Open another PDF).
+3. Responsive — below 720 px container width the flip-book switches to single-page
+   portrait and scales to fit (`ScaleToFit` render-prop → `orientation`, `BookViewer` keyed
+   on it); controls wrap; avatar canvas full-width; Library becomes a slide-over (from the
+   extension phase). Verified by layout math only — no device testing here.
+4. Secrets audit — no `'use client'` file references `process.env` beyond `NEXT_PUBLIC_*`;
+   `FISH_AUDIO_API_KEY` / `SERVICE_ROLE` appear only in `app/api/*`, `lib/tts/*`,
+   `lib/supabase/server.ts`, `lib/supabase/middleware.ts`; no client file imports
+   `lib/tts/{fish,piper,rhubarb}` or `lib/supabase/server`.
+5. `README.md` — stack, quick start, full env-var table (with where each is read), binaries,
+   avatars, playback design, Supabase mode, extension, scripts.
+
+**Verified**
+- `npm run build` (isolated copy, final code) clean; `tsc` + `next lint` clean;
+  `npm test` → 16 passing (chunking + timing tests added).
+- Dev server: `/read/new` 200; `/api/speak` on a 211-char chunk → Fish, 61 visemes, ~5 s.
+- Not verified in a browser: highlight sync feel, chunk hand-off gaps, IndexedDB persistence,
+  portrait layout on a phone, the animated background's GPU cost on low-end devices.
+
+**Known limits**
+- Word timing is estimated (character-weighted per chunk), not measured — expect ±1 word.
+- There can be a brief gap between chunks (new `<audio>` per chunk).
+- Fish quota is spent once per chunk per avatar/voice; the cache is per browser (IndexedDB).
+
+**Files changed**
+- New: `lib/tts/chunk.ts`, `lib/clip-cache.ts`, `lib/events.ts`,
+  `components/library/UploadButton.tsx`, `app/error.tsx`, `app/(reader)/error.tsx`,
+  `tests/chunk.test.ts`, `README.md`
+- Rewritten: `app/(reader)/read/[bookId]/page.tsx`, `components/book/BookViewer.tsx`,
+  `components/book/ScaleToFit.tsx`, `lib/tts/rhubarb.ts`
+- Changed: `app/api/speak/route.ts`, `components/avatar/AvatarCanvas.tsx`,
+  `components/book/UploadDropzone.tsx`, `components/library/ReaderShell.tsx`,
+  `components/library/LibrarySidebar.tsx`, `components/library/LocalLibrarySidebar.tsx`,
+  `app/globals.css`, `.env.local.example`, `.env.local` (local)
+
+**How to verify**
+- Open a book, click an avatar: "Preparing audio 1/N" for a few seconds, then speech starts
+  while the counter keeps climbing; words highlight in the page as they're spoken.
+- Pause → highlight and mouth freeze; Resume → continues from the same word.
+- Reload, click the same avatar → starts instantly (IndexedDB cache).
+- Press Next while playing → new page starts (near-instant if prefetched). Prev → instant.
+- Sidebar "+ Upload PDF" while a book is open → modal drop-zone; drop a non-PDF → red message.
+- Rename `public/avatars/alex.vrm` temporarily → Alex shows the placeholder labelled
+  "Alex · no 3D model". Stop Fish + Piper (bad key, `PIPER_PATH=nope`) → red card with Retry.
+- Narrow the window below ~720 px → single-page book, wrapped controls, ☰ Library.

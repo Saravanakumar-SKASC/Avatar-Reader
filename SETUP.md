@@ -103,3 +103,31 @@ Each voice is a pair of files: `<voice>.onnx` and `<voice>.onnx.json`.
    ```
 
    Piper emits 16-bit mono WAV, which Rhubarb accepts directly.
+
+## Supabase (auth + persistence)
+
+1. Create a project at https://supabase.com/dashboard. From **Project Settings → API**
+   copy the Project URL and the `anon` key into `.env.local`:
+
+   ```
+   NEXT_PUBLIC_SUPABASE_URL=https://<ref>.supabase.co
+   NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon key>
+   ```
+
+   Newer projects show a *publishable* key (`sb_publishable_…`) in the **Connect** dialog
+   instead of an anon JWT. Use it under `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` — the app
+   accepts either name.
+
+   (`SUPABASE_SERVICE_ROLE_KEY` is not needed yet; when it is, it stays server-only.)
+2. Open **SQL Editor**, paste `supabase/migrations/0001_init.sql`, run it. This creates
+   `books`, `reading_progress`, `bookmarks` with owner-only RLS, and a private `books`
+   storage bucket where PDFs and extracted page text live under `<user_id>/`.
+3. **Authentication → URL Configuration**: Site URL `http://localhost:3000`; add
+   `http://localhost:3000/auth/callback` to Redirect URLs (add your production URL too).
+4. Email sign-in works out of the box. With "Confirm email" on (default), sign-up sends a
+   link that lands on `/auth/callback`. Turn it off under **Authentication → Providers →
+   Email** for faster local testing.
+5. Google: in Google Cloud Console create an OAuth 2.0 Client ID (Web application) with
+   authorised redirect URI `https://<ref>.supabase.co/auth/v1/callback`. Paste the client
+   ID/secret into **Authentication → Providers → Google** and enable it.
+6. Restart `npm run dev`. `/upload` and `/read/*` now require sign-in; `/login` handles both.

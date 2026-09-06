@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Avatar Reader</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <span class="title">Avatar Reader</span>
+      <button id="reload" title="Reload">↻</button>
+      <button id="open-window" title="Open in a window (needed for Google sign-in)">⧉</button>
+    </header>
+
+    <div id="offline" class="notice" hidden>
+      <p><strong>The app isn't running.</strong></p>
+      <p>Start it from the project folder, then press ↻:</p>
+      <pre>npm run dev</pre>
+      <p class="muted">Expected at <span id="app-url"></span></p>
+    </div>
+
+    <iframe id="app" title="Avatar Reader app" allow="autoplay"></iframe>
+
+    <script src="config.js"></script>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>
