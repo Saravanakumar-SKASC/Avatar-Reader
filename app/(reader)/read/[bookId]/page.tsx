@@ -2,9 +2,10 @@
 
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { loadBook } from '@/lib/book-store';
 import type { StoredBook } from '@/types/book';
+import type { SpeakResponse } from '@/types/tts';
 
 // react-pageflip touches `window` on import; it must never render on the server.
 const BookViewer = dynamic(() => import('@/components/book/BookViewer'), { ssr: false });
@@ -12,10 +13,52 @@ const BookViewer = dynamic(() => import('@/components/book/BookViewer'), { ssr: 
 export default function ReadPage({ params }: { params: { bookId: string } }) {
   const [book, setBook] = useState<StoredBook | null | undefined>(undefined);
   const [currentPage, setCurrentPage] = useState(0);
+  const [speaking, setSpeaking] = useState(false);
+  const [engineUsed, setEngineUsed] = useState<SpeakResponse['engineUsed'] | null>(null);
+  const [speakError, setSpeakError] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     setBook(loadBook(params.bookId));
   }, [params.bookId]);
+
+  // Stop any playing audio when the component unmounts.
+  useEffect(() => () => audioRef.current?.pause(), []);
+
+  async function playPage() {
+    if (!book) return;
+    audioRef.current?.pause();
+    setSpeaking(true);
+    setSpeakError(null);
+    setEngineUsed(null);
+
+    try {
+      const res = await fetch('/api/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: book.pages[currentPage] }),
+      });
+      const body = await res.json();
+      if (!res.ok) {
+        const detail = [body.fish, body.piper].filter(Boolean).join(' | ');
+        throw new Error(detail ? `${body.error}: ${detail}` : body.error ?? `Request failed (${res.status})`);
+      }
+      const { audioBase64, engineUsed: engine } = body as SpeakResponse;
+      setEngineUsed(engine);
+
+      const audio = new Audio(`data:audio/wav;base64,${audioBase64}`);
+      audioRef.current = audio;
+      audio.onended = () => setSpeaking(false);
+      audio.onerror = () => {
+        setSpeakError('Audio playback failed');
+        setSpeaking(false);
+      };
+      await audio.play();
+    } catch (err) {
+      setSpeakError(err instanceof Error ? err.message : 'Speech failed');
+      setSpeaking(false);
+    }
+  }
 
   const pageCount = book?.pages.length ?? 0;
 
@@ -73,6 +116,22 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
         >
           Next →
         </button>
+      </div>
+
+      <div className="flex flex-col items-center gap-2">
+        <button
+          onClick={playPage}
+          disabled={speaking || !book.pages[currentPage]?.trim()}
+          className="rounded bg-emerald-600 px-5 py-2 font-medium disabled:opacity-40"
+        >
+          {speaking ? 'Speaking…' : '▶ Play page'}
+        </button>
+        {engineUsed && (
+          <span className="text-xs text-gray-400">
+            engine: {engineUsed === 'fish' ? 'Fish Audio' : 'Piper (local fallback)'}
+          </span>
+        )}
+        {speakError && <p className="max-w-md text-center text-sm text-red-400">{speakError}</p>}
       </div>
     </main>
   );

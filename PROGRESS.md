@@ -95,3 +95,95 @@
   You land on `/read/<uuid>` with a flip-book: drag a page corner or click a page edge to
   flip; Prev/Next buttons and arrow keys move pages; the counter stays in sync with drags.
 - Open `/read/does-not-exist` → "Book not found" with an upload link.
+
+## 2026-09-06 — Phase 3: Server-side TTS + viseme timing (one hardcoded voice)
+
+**What was built**
+- `lib/tts/fish.ts` — `synthesizeWithFish(text, referenceId)`: POST to
+  `https://api.fish.audio/v1/tts` (model header `s2.1-pro-free`, `format: 'wav'`).
+  Throws if `FISH_AUDIO_API_KEY` is unset or the response is non-2xx. `reference_id` is
+  omitted from the body when empty so Fish uses its default voice until real ids are filled in.
+- `lib/tts/piper.ts` — `synthesizeWithPiper(text, voice)`: spawns
+  `piper --model <PIPER_VOICES_DIR>/<voice>.onnx --output_file <tmp>.wav` with the text on
+  stdin, reads and deletes the WAV. Env: `PIPER_PATH` (default `piper`),
+  `PIPER_VOICES_DIR` (default `~/piper-voices`).
+- `lib/tts/rhubarb.ts` — `extractVisemes(buffer)`: writes a temp WAV, runs
+  `rhubarb <wav> -f json -o <json>` via `execFile`, returns `mouthCues`, cleans up.
+  Env: `RHUBARB_PATH` (default `rhubarb`). Temp files go to `os.tmpdir()`.
+- `app/api/speak/route.ts` — POST `{ text }`. Tries Fish; on any throw, logs a warning and
+  falls back to Piper; then runs Rhubarb on whichever WAV resulted. Returns
+  `{ audioBase64, visemes, engineUsed: 'fish' | 'piper' }`. Errors: 400 bad body,
+  502 `{ error, fish, piper }` if both engines fail, 500 `{ error, engineUsed }` if Rhubarb fails.
+  Voice is hardcoded in the route (`fishReferenceId: ''`, `piperVoice: 'en_US-ryan-high'`).
+- `types/tts.ts` — `Viseme`, `TtsEngine`, `SpeakResponse`.
+- Reader page — "▶ Play page" button posts the current page's text to `/api/speak`, plays the
+  WAV via a data-URL `Audio`, shows which engine was used, and surfaces errors inline.
+  Visemes are returned but not consumed yet (avatar phase).
+- `.env.local.example` — documented optional `RHUBARB_PATH`, `PIPER_PATH`, `PIPER_VOICES_DIR`.
+  `SETUP.md` updated to say those env vars are now live.
+- Not done (deferred per phase scoping): Supabase Storage caching of audio+visemes (CLAUDE.md
+  rule 2) — every click currently re-synthesizes. Must land before the caching rule is honoured.
+
+**Verified**
+- `npm run build` zero errors; `npm test` 1 passing.
+- Live: `POST /api/speak` with a real key reached Rhubarb with `engineUsed: "fish"`, i.e. the
+  Fish call succeeds with the default voice. Rhubarb/Piper are not installed on this machine,
+  so the viseme step and the Piper fallback were not exercised end-to-end.
+
+**Files changed**
+- `lib/tts/fish.ts`, `lib/tts/piper.ts`, `lib/tts/rhubarb.ts`, `app/api/speak/route.ts`,
+  `types/tts.ts` (new)
+- `app/(reader)/read/[bookId]/page.tsx` (Play page button)
+- `.env.local.example`, `SETUP.md`
+- Removed `lib/tts/.gitkeep`
+
+**How to verify**
+- Install `rhubarb` and `piper` + the `en_US-ryan-high` voice per SETUP.md; put
+  `FISH_AUDIO_API_KEY` in `.env.local`.
+- `npm run dev`, upload a PDF, click "▶ Play page" → audio plays, label shows "Fish Audio".
+- Remove/blank `FISH_AUDIO_API_KEY`, restart dev, click again → label shows
+  "Piper (local fallback)" and audio still plays.
+- CLI: `curl -s -X POST localhost:3000/api/speak -H 'Content-Type: application/json'
+  -d '{"text":"Hello"}' | jq '{engineUsed, n: (.visemes|length)}'` → non-zero viseme count.
+
+## 2026-09-06 — Phase 3 follow-up: Rhubarb installed, Fish WAV header fix
+
+**What changed**
+- Installed Rhubarb Lip Sync 1.14.0 (x86_64 build, runs under Rosetta) at
+  `~/bin/rhubarb/rhubarb`; `.env.local` sets `RHUBARB_PATH=~/bin/rhubarb/rhubarb`.
+- Fish Audio returns a *streaming* WAV: RIFF size and `data` chunk size are `0xFFFFFFFF`
+  placeholders. Rhubarb refuses such files ("Could not open sound file"). Added
+  `lib/tts/wav.ts` → `fixWavHeader(buffer)` which rewrites both sizes from the real length
+  (no-op for well-formed WAVs, e.g. Piper output; passes non-WAV data through).
+  `extractVisemes` now writes the fixed buffer to disk before invoking Rhubarb.
+- `tests/wav.test.ts` — 3 unit tests for `fixWavHeader`.
+
+**Verified**
+- `POST /api/speak` on the dev server → `engineUsed: "fish"`, 18 visemes, no error.
+- `npm test` → 4 passing.
+- Piper is still not installed, so the fallback path remains unexercised.
+
+**Files changed**
+- `lib/tts/wav.ts`, `tests/wav.test.ts` (new); `lib/tts/rhubarb.ts`; `.env.local` (local only)
+
+## 2026-09-06 — Phase 3 follow-up: Piper installed, fallback verified
+
+**What changed**
+- The `piper_macos_aarch64.tar.gz` GitHub release is unusable on macOS (Intel binary,
+  missing `libespeak-ng` / `libpiper_phonemize` / `libonnxruntime` dylibs). Installed the
+  `piper-tts` Python package into `~/bin/piper-venv` instead; its `piper` CLI accepts the
+  same `--model` / `--output_file` flags and reads text from stdin, so `lib/tts/piper.ts`
+  needed no changes. `.env.local` sets `PIPER_PATH=~/bin/piper-venv/bin/piper`.
+- Downloaded `en_US-ryan-high.onnx` + `.onnx.json` into `~/piper-voices/`.
+- `SETUP.md` Piper section rewritten: macOS uses the pip route; Linux/Windows keep the
+  tarball route; voice-download example added.
+
+**Verified**
+- Direct: `piper` → 22 kHz WAV → `rhubarb` → 24 cues.
+- Through the app with Fish returning 401: `POST /api/speak` → `engineUsed: "piper"`,
+  17 visemes, ~4.6 s for one sentence (Rhubarb dominates). Fallback path is live (rule 6).
+- Fish key on disk now returns 401 from the API — key was revoked/rotated on the Fish side;
+  needs a fresh key pasted into `.env.local`.
+
+**Files changed**
+- `SETUP.md`; `.env.local` (local only). No source changes.

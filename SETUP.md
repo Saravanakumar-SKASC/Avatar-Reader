@@ -27,8 +27,8 @@ for both the Fish Audio and Piper paths, since neither engine returns visemes.
 2. Unzip it. The archive contains the `rhubarb` executable plus a `res/`
    folder — keep them together; `rhubarb` looks for `res/` next to itself.
 3. Put the extracted folder somewhere stable (e.g. `~/bin/rhubarb/`) and either
-   add it to your `PATH` or point the app at it via `RHUBARB_PATH` (env var
-   introduced in a later phase).
+   add it to your `PATH` or point the app at it via `RHUBARB_PATH` (env var,
+   used by the app; defaults to `rhubarb` on PATH).
 4. macOS: on first run Gatekeeper may block it. Run
    `xattr -dr com.apple.quarantine ~/bin/rhubarb` or allow it in
    System Settings → Privacy & Security.
@@ -43,17 +43,36 @@ for both the Fish Audio and Piper paths, since neither engine returns visemes.
 
 Local neural text-to-speech. Zero cost fallback for Fish Audio.
 
+**macOS (recommended — the GitHub tarballs are broken on macOS):** the
+`piper_macos_aarch64.tar.gz` release ships an Intel binary and is missing the
+dynamic libraries it links against, so it fails with `Library not loaded:
+@rpath/libespeak-ng.1.dylib`. Use the Python package instead, which provides the
+same `piper` CLI and flags:
+
+```bash
+uv venv ~/bin/piper-venv --python 3.12      # or: python3 -m venv ~/bin/piper-venv
+uv pip install --python ~/bin/piper-venv/bin/python piper-tts
+#   (or: ~/bin/piper-venv/bin/pip install piper-tts)
+~/bin/piper-venv/bin/piper --help
+```
+
+Then set `PIPER_PATH=~/bin/piper-venv/bin/piper` in `.env.local`.
+
+**Linux / Windows:**
+
 1. Download the binary for your platform from
    https://github.com/rhasspy/piper/releases
-   (e.g. `piper_macos_aarch64.tar.gz`, `piper_macos_x64.tar.gz`,
-   `piper_linux_x86_64.tar.gz`, `piper_windows_amd64.zip`).
+   (e.g. `piper_linux_x86_64.tar.gz`, `piper_windows_amd64.zip`).
 2. Extract it. The archive contains the `piper` executable and its shared
    libraries (`espeak-ng-data/`, `libonnxruntime`, etc.) — keep them together.
 3. Put the folder somewhere stable (e.g. `~/bin/piper/`) and either add it to
-   `PATH` or point the app at it via `PIPER_PATH` (env var introduced in a later
-   phase).
-4. Download voice models. Each voice is a pair of files: `<voice>.onnx` and
-   `<voice>.onnx.json`. Browse and download from
+   `PATH` or point the app at it via `PIPER_PATH` (env var, used by the app;
+   defaults to `piper` on PATH).
+
+**Voice models (all platforms):**
+
+Each voice is a pair of files: `<voice>.onnx` and `<voice>.onnx.json`.
+   Browse and download from
    https://huggingface.co/rhasspy/piper-voices/tree/main
    (voices are organized by language, e.g. `en/en_US/ryan/high/`).
    Voices this project uses (see the avatar registry in CLAUDE.md):
@@ -67,9 +86,16 @@ Local neural text-to-speech. Zero cost fallback for Fish Audio.
    | en_US-libritts_r-medium | en/en_US/libritts_r/medium/ (multi-speaker) |
    | en_US-joe-medium      | en/en_US/joe/medium/                    |
 
-   Put the model files in one directory (e.g. `~/piper-voices/`); a later phase
-   will read that location from `PIPER_VOICES_DIR`.
-5. Verify:
+   Put the model files in one directory (e.g. `~/piper-voices/`); the app reads that
+   location from `PIPER_VOICES_DIR` (defaults to `~/piper-voices`). Example:
+
+   ```bash
+   mkdir -p ~/piper-voices && cd ~/piper-voices
+   B=https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high
+   curl -sL -O "$B/en_US-ryan-high.onnx" && curl -sL -O "$B/en_US-ryan-high.onnx.json"
+   ```
+
+**Verify:**
 
    ```bash
    piper --version
