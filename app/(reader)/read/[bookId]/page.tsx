@@ -4,11 +4,17 @@ import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { loadBook } from '@/lib/book-store';
+import { DEFAULT_AVATAR_ID, getAvatar } from '@/lib/avatars';
+import AvatarPicker from '@/components/avatar/AvatarPicker';
 import type { StoredBook } from '@/types/book';
 import type { SpeakResponse } from '@/types/tts';
+import type { AvatarId } from '@/types/avatar';
 
-// react-pageflip touches `window` on import; it must never render on the server.
+// react-pageflip and three both touch `window` on import; never render them on the server.
 const BookViewer = dynamic(() => import('@/components/book/BookViewer'), { ssr: false });
+const AvatarCanvas = dynamic(() => import('@/components/avatar/AvatarCanvas'), { ssr: false });
+
+const AVATAR_STORAGE_KEY = 'avatar-reader:avatar';
 
 export default function ReadPage({ params }: { params: { bookId: string } }) {
   const [book, setBook] = useState<StoredBook | null | undefined>(undefined);
@@ -17,10 +23,23 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
   const [engineUsed, setEngineUsed] = useState<SpeakResponse['engineUsed'] | null>(null);
   const [speakError, setSpeakError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [avatarId, setAvatarId] = useState<AvatarId>(DEFAULT_AVATAR_ID);
+  const avatar = getAvatar(avatarId);
 
   useEffect(() => {
     setBook(loadBook(params.bookId));
+    try {
+      const saved = localStorage.getItem(AVATAR_STORAGE_KEY);
+      if (saved) setAvatarId(getAvatar(saved).id);
+    } catch {}
   }, [params.bookId]);
+
+  function selectAvatar(id: AvatarId) {
+    setAvatarId(id);
+    try {
+      localStorage.setItem(AVATAR_STORAGE_KEY, id);
+    } catch {}
+  }
 
   // Stop any playing audio when the component unmounts.
   useEffect(() => () => audioRef.current?.pause(), []);
@@ -96,7 +115,12 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
     <main className="flex min-h-screen flex-col items-center gap-6 bg-neutral-900 p-8 text-white">
       <h1 className="text-lg font-medium">{book.name}</h1>
 
-      <BookViewer pages={book.pages} currentPage={currentPage} onFlip={setCurrentPage} />
+      <div className="flex flex-col items-center gap-6 lg:flex-row lg:items-start">
+        <AvatarCanvas avatar={avatar} className="h-[420px] w-[320px] rounded-xl bg-neutral-800" />
+        <BookViewer pages={book.pages} currentPage={currentPage} onFlip={setCurrentPage} />
+      </div>
+
+      <AvatarPicker selectedId={avatarId} onSelect={selectAvatar} />
 
       <div className="flex items-center gap-4">
         <button

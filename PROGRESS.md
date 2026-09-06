@@ -187,3 +187,81 @@
 
 **Files changed**
 - `SETUP.md`; `.env.local` (local only). No source changes.
+
+## 2026-09-06 — Phase 4: Selectable 3D avatars, idle + blink (no lip-sync)
+
+**What was built**
+- `types/avatar.ts` + `lib/avatars.ts` — `AVATARS` registry (7 entries from CLAUDE.md:
+  id, name, personality, `fishReferenceId` (empty placeholders), `emotionTag`, `piperVoice`,
+  optional `piperSpeaker`, `vrmUrl` `/avatars/<id>.vrm`, `thumbnailUrl` `/avatars/<id>.png`,
+  accent `color`). `DEFAULT_AVATAR_ID`, `getAvatar(id)`.
+- `components/avatar/useBlink.ts` — render-loop blink driver (`useFrame`). Random 2–6 s
+  interval, 200 ms sine close/open. A blink is a single state machine per hook instance:
+  the next blink is scheduled only after the current one reaches weight 0, so overlapping
+  blinks cannot occur. Each avatar instance gets independent timing.
+- `components/avatar/AvatarCanvas.tsx` — R3F `<Canvas>`. `AvatarModel` HEAD-checks the
+  `.vrm` URL; if present, loads it with `GLTFLoader` + `VRMLoaderPlugin`, applies
+  `VRMUtils.rotateVRM0`, drives `expressionManager.setValue('blink', w)` and `vrm.update`.
+  If missing (404) or failing to parse, renders a placeholder (box body, sphere head, two
+  eye spheres that squash on blink, `Html` name label). Both variants share a subtle idle
+  bob/sway. Models are disposed on swap/unmount; `key={avatar.id}` forces clean remounts.
+- `components/avatar/AvatarPicker.tsx` — horizontal-scroll carousel of 7 cards:
+  thumbnail (`<id>.png`, falls back to an initial badge), name, personality, emerald border
+  on the selected card, `aria-pressed`.
+- Reader page — avatar canvas (320×420) beside the book, picker below the controls.
+  Selection swaps the loaded model and is remembered in `localStorage`
+  (`avatar-reader:avatar`). `AvatarCanvas` is loaded via `next/dynamic` `ssr: false`.
+- `public/avatars/README.md` — where to drop `<id>.vrm` / `<id>.png`.
+- No `.vrm` files ship yet; all seven avatars currently render as placeholders.
+- No lip-sync; visemes from `/api/speak` are still unused. Voice selection is not yet
+  wired to the picker (Phase 5 registry work).
+
+**Verified**
+- `npm run build` (on an isolated copy, to avoid clobbering the running dev server's
+  `.next`) → zero errors. `npx tsc --noEmit` + `next lint` clean. `npm test` → 4 passing.
+- Dev server: `/read/<id>` 200; `/avatars/alex.vrm` HEAD 404 → placeholder path.
+- Not verified: WebGL rendering in a real browser (no browser automation here).
+
+**Files changed**
+- `types/avatar.ts`, `lib/avatars.ts`, `components/avatar/useBlink.ts`,
+  `components/avatar/AvatarCanvas.tsx`, `components/avatar/AvatarPicker.tsx`,
+  `public/avatars/README.md` (new)
+- `app/(reader)/read/[bookId]/page.tsx`
+- Removed `components/avatar/.gitkeep`
+
+**How to verify**
+- Open a book at `/read/<id>`: a placeholder figure idles (gentle bob/sway) left of the
+  book and blinks at random every 2–6 s. Watch for ~20 s: no double-blinks or stuck eyes.
+- The picker shows 7 cards; scroll horizontally. Click a card → border highlights, the
+  figure's body colour and label change. Reload → selection persists.
+- Drop any VRM at `public/avatars/alex.vrm`, reload → the real model renders and blinks
+  via its `blink` expression.
+
+## 2026-09-06 — Phase 4 follow-up: WebGL fallback
+
+**What changed**
+- `AvatarCanvas` now probes for a WebGL/WebGL2 context before mounting the R3F `<Canvas>`.
+  If none is available (e.g. VS Code's Simple Browser, or Chrome with hardware
+  acceleration off) it renders a static initial badge with a hint to open a real browser,
+  instead of the whole reader crashing with "THREE.WebGLRenderer: Error creating WebGL
+  context". A `CanvasErrorBoundary` also contains any renderer error to the avatar panel.
+
+**Files changed**
+- `components/avatar/AvatarCanvas.tsx`
+
+## 2026-09-06 — Phase 4 follow-up: camera frames the face
+
+**What changed**
+- With a real VRM, the fixed camera (hip height, looking at the floor origin) showed only
+  the legs. `AvatarCanvas` now has a `FaceCamera` component: after a VRM loads, `eyeHeight()`
+  reads the humanoid `head` bone's world position (+0.06 m to reach the eyes) and the camera
+  is placed at that height, 0.75 m in front, looking straight at it (30° FOV → head +
+  shoulders). The placeholder uses the same component at 1.4 m / 1.4 m distance.
+- Idle sway amplitude reduced so the close-up doesn't drift sideways.
+- Canvas `near` plane lowered to 0.05 for the close shot.
+- First real model dropped in: `public/avatars/Alex.vrm` (VRM 1.0, 54 bones, has `blink` and
+  `aa/ee/ih/oh/ou` expressions — usable for lip-sync later). **Rename to lowercase
+  `alex.vrm`**: macOS serves it case-insensitively, Linux will not.
+
+**Files changed**
+- `components/avatar/AvatarCanvas.tsx`
