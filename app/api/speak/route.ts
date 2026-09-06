@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { synthesizeWithFish } from '@/lib/tts/fish';
 import { synthesizeWithPiper } from '@/lib/tts/piper';
 import { extractVisemes } from '@/lib/tts/rhubarb';
+import { extractWordTimestamps, wordTimestampsEnabled } from '@/lib/timing/extract-word-timestamps';
 import { AVATARS, DEFAULT_AVATAR_ID, withEmotionTag } from '@/lib/avatars';
 import type { SpeakRequest, SpeakResponse, TtsEngine } from '@/types/tts';
 
@@ -50,10 +51,21 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    const visemes = await extractVisemes(audio, text);
+    // Visemes (Rhubarb) and word timestamps (Whisper) both read the same WAV; run them together.
+    // Word timing is best-effort: on failure the client falls back to proportional estimates.
+    const [visemes, words] = await Promise.all([
+      extractVisemes(audio, text),
+      wordTimestampsEnabled()
+        ? extractWordTimestamps(audio, text).catch((err) => {
+            console.warn('[speak] word timestamps unavailable:', err instanceof Error ? err.message : err);
+            return null;
+          })
+        : Promise.resolve(null),
+    ]);
     const res: SpeakResponse = {
       audioBase64: audio.toString('base64'),
       visemes,
+      words,
       engineUsed,
       avatarId: avatar.id,
       fishReferenceId: engineUsed === 'fish' ? fishReferenceId : '',

@@ -6,10 +6,14 @@ import { loadBook, loadProgress, saveProgress } from '@/lib/books';
 import { DEFAULT_AVATAR_ID, getAvatar } from '@/lib/avatars';
 import { splitIntoChunks, wordAtFraction, type Chunk } from '@/lib/tts/chunk';
 import { clipKey, getClip, putClip, type Clip } from '@/lib/clip-cache';
+import { wordAtTime } from '@/lib/timing/align';
 import { paginate, type BookPage } from '@/lib/paginate';
+import { getPageEmotions } from '@/lib/emotion/page-emotions';
+import { cuesForChunk } from '@/lib/emotion/timeline';
+import type { EmotionCue, EmotionSpan } from '@/lib/emotion/types';
 import { OPEN_UPLOAD_EVENT } from '@/lib/events';
 import AvatarPicker from '@/components/avatar/AvatarPicker';
-import ScaleToFit from '@/components/book/ScaleToFit';
+import BookFrame from '@/components/book/BookFrame';
 import UploadDropzone from '@/components/book/UploadDropzone';
 import type { WordHighlight } from '@/components/book/BookViewer';
 import type { LoadedBook } from '@/types/book';
@@ -70,6 +74,7 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
   const [currentPage, setCurrentPage] = useState(0);
   const [showUpload, setShowUpload] = useState(false);
   const lastSavedRef = useRef<number>(-1);
+  const startOnCoverRef = useRef(true); // rest on the cover until there's a saved position or reading starts
 
   // ----- avatar + voice (source of truth #2: avatarId) -----
   const [avatarId, setAvatarId] = useState<AvatarId>(DEFAULT_AVATAR_ID);
@@ -88,11 +93,13 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
   const [playRequest, setPlayRequest] = useState(0); // 0 = never asked to read; >0 = reading is armed
   const [progress, setProgress] = useState<{ ready: number; total: number } | null>(null);
   const [visemes, setVisemes] = useState<Viseme[]>([]);
+  const [emotionCues, setEmotionCues] = useState<EmotionCue[]>([]);
+  const pageEmotionsRef = useRef<{ page: number; timeline: EmotionSpan[] } | null>(null);
   const [meta, setMeta] = useState<SpeakMeta | null>(null);
   const [speakError, setSpeakError] = useState<string | null>(null);
   const [highlight, setHighlight] = useState<WordHighlight | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const currentChunkRef = useRef<{ chunk: Chunk; page: number } | null>(null);
+  const currentChunkRef = useRef<{ chunk: Chunk; page: number; words: Clip['words'] } | null>(null);
   const runRef = useRef<Run | null>(null);
   const idRef = useRef(0);
 
@@ -112,6 +119,7 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
         if (b) {
           setCurrentPage(page);
           lastSavedRef.current = page;
+          startOnCoverRef.current = page === 0;
         }
         setBook(b);
       } catch (err) {
@@ -202,6 +210,7 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
     audioRef.current = null;
     currentChunkRef.current = null;
     setVisemes([]);
+    setEmotionCues([]);
     setHighlight(null);
   }, []);
 
@@ -237,8 +246,10 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
         run.controller.signal.addEventListener('abort', () => resolve('aborted'), { once: true });
 
         audioRef.current = audio; // set before publishing cues so the lip-sync loop reads this element's clock
-        currentChunkRef.current = { chunk, page };
+        currentChunkRef.current = { chunk, page, words: clip.words ?? null };
         setHighlight({ page, word: chunk.startWord, from: chunk.startWord, to: chunk.startWord + chunk.wordCount });
+        const tl = pageEmotionsRef.current;
+        setEmotionCues(tl && tl.page === page ? cuesForChunk(tl.timeline, chunk.startWord, chunk.wordCount, chunk.fractions) : []);
         setVisemes(clip.visemes);
         setMeta(clip.meta);
         setSpeakError(null);
@@ -291,8 +302,8 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
         const detail = [body.fish, body.piper].filter(Boolean).join(' | ');
         throw new Error(detail ? `${body.error}: ${detail}` : body.error ?? `Request failed (${res.status})`);
       }
-      const { audioBase64, visemes: cues, ...rest } = body as SpeakResponse;
-      const clip: Clip = { audioBase64, visemes: cues, meta: rest };
+      const { audioBase64, visemes: cues, words, ...rest } = body as SpeakResponse;
+      const clip: Clip = { audioBase64, visemes: cues, words: words ?? null, meta: rest };
       void putClip(key, clip);
       return clip;
     };
@@ -300,6 +311,21 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
     setStatus('loading');
     setSpeakError(null);
     setProgress({ ready: 0, total: chunks.length });
+
+    // Emotion timeline for this page — cached per (book, page) only; shared by every avatar.
+    // Never blocks audio: if it lands mid-clip, the current clip's cues are refreshed.
+    getPageEmotions(book.id, page, pageText, run.controller.signal)
+      .then((timeline) => {
+        if (stale()) return;
+        pageEmotionsRef.current = { page, timeline };
+        const cur = currentChunkRef.current;
+        if (cur && cur.page === page) {
+          setEmotionCues(cuesForChunk(timeline, cur.chunk.startWord, cur.chunk.wordCount, cur.chunk.fractions));
+        }
+      })
+      .catch((err) => {
+        if (!stale()) console.warn('[emotion] timeline unavailable, face stays neutral:', err instanceof Error ? err.message : err);
+      });
 
     let ready = 0;
     const clipPromises = withConcurrency(
@@ -338,6 +364,7 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
     // Once this page is fully fetched, warm the cache for the next page (same run: cancelled on any change).
     Promise.allSettled(clipPromises).then(async () => {
       if (stale() || page + 1 >= pageCount) return;
+      void getPageEmotions(book.id, page + 1, pages[page + 1].text, run.controller.signal).catch(() => {});
       const nextChunks = splitIntoChunks(pages[page + 1].text);
       for (let i = 0; i < nextChunks.length; i++) {
         if (stale()) return;
@@ -359,7 +386,12 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
       const a = audioRef.current;
       const c = currentChunkRef.current;
       if (a && c && !a.paused && !a.ended && a.duration > 0) {
-        const w = c.chunk.startWord + wordAtFraction(c.chunk.fractions, a.currentTime / a.duration);
+        // Measured Whisper timings when the clip has them; proportional estimate otherwise.
+        const local =
+          c.words && c.words.length === c.chunk.wordCount
+            ? wordAtTime(c.words, a.currentTime)
+            : wordAtFraction(c.chunk.fractions, a.currentTime / a.duration);
+        const w = c.chunk.startWord + local;
         if (w !== last) {
           last = w;
           setHighlight({
@@ -409,6 +441,7 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
     resetPlayback();
     setCurrentPage(0);
     lastSavedRef.current = 0;
+    startOnCoverRef.current = true;
     setLoadError(null);
     setBook(b);
     setShowUpload(false);
@@ -494,25 +527,27 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
           <AvatarCanvas
             avatar={avatar}
             visemes={visemes}
+            emotionCues={emotionCues}
             audioRef={audioRef}
             className="h-full w-full max-w-[min(100%,calc(30vh*0.625))] overflow-hidden rounded-3xl bg-black/30 shadow-[0_20px_60px_rgba(0,0,0,.45)] ring-1 ring-white/10 lg:max-w-none"
           />
         </div>
-        <div className="min-h-0 min-w-0 w-full flex-1 lg:max-w-[960px]">
-          {/* react-pageflip needs fixed pixel dimensions; scale the whole book to fit the stage */}
-          <ScaleToFit pageWidth={480} pageHeight={640}>
-            {(orientation) => (
-              <div className="shadow-[0_30px_80px_rgba(0,0,0,.55)]">
-                <BookViewer
-                  pages={pages.map((p) => p.text)}
-                  currentPage={currentPage}
-                  onFlip={setCurrentPage}
-                  highlight={highlight}
-                  orientation={orientation}
-                />
-              </div>
+        <div className="min-h-0 min-w-0 w-full flex-1 py-3 lg:max-w-[1200px]">
+          {/* BookFrame sizes the container to the stage; the flip-book stretches into it */}
+          <BookFrame>
+            {(metrics) => (
+              <BookViewer
+                pages={pages.map((p) => p.text)}
+                currentPage={currentPage}
+                onFlip={setCurrentPage}
+                highlight={highlight}
+                metrics={metrics}
+                title={book.title ?? 'Untitled'}
+                author={book.author}
+                startOnCover={startOnCoverRef.current}
+              />
             )}
-          </ScaleToFit>
+          </BookFrame>
         </div>
       </section>
 

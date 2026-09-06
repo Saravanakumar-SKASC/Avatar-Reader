@@ -32,8 +32,14 @@ Then install the two binaries below, drop `.vrm` models in `public/avatars/`, an
 | `NEXT_PUBLIC_SUPABASE_URL` | client+server | only for Supabase mode | Project URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` or `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | client+server | only for Supabase mode | Public key (either name) |
 | `SUPABASE_SERVICE_ROLE_KEY` | **server only** | no (unused so far) | Reserved for server-side admin work |
+| `OPENAI_API_KEY` | **server only** | no | If set, sentence emotions are classified by OpenAI instead of the local model |
+| `OPENAI_EMOTION_MODEL` | server | no (default `gpt-4o-mini`) | OpenAI model for emotion classification |
+| `EMOTION_MODEL` | server | no (default `SamLowe/roberta-base-go_emotions-onnx`) | Local Hugging Face model id |
+| `EMOTION_MODEL_CACHE` | server | no (default `./.cache/transformers`) | Where local models (emotion ~130 MB, Whisper ~40 MB) are downloaded once |
+| `WHISPER_MODEL` | server | no (default `onnx-community/whisper-tiny.en_timestamped`) | Whisper export used for word timestamps (must be a `_timestamped` export) |
+| `WORD_TIMESTAMPS` | server | no (default on) | `off` skips Whisper; the highlight then uses proportional estimates |
 
-Secrets (`FISH_AUDIO_API_KEY`, `SUPABASE_SERVICE_ROLE_KEY`) are read only inside
+Secrets (`FISH_AUDIO_API_KEY`, `OPENAI_API_KEY`, `SUPABASE_SERVICE_ROLE_KEY`) are read only inside
 `app/api/*` route handlers and `lib/tts/*`; no `'use client'` file touches them.
 
 ## System binaries
@@ -65,7 +71,21 @@ synthesised while the rest stream in behind it; the next page is prefetched in t
 background. Every clip is cached (memory + IndexedDB) per book/page/chunk/avatar/voice, so
 repeat plays are instant and never re-spend TTS quota. Changing page or avatar cancels
 whatever is in flight and starts the new combination — old and new audio never overlap.
-When a page finishes it advances to the next automatically. Speed (0.75× – 2×) is a
+When a page finishes it advances to the next automatically.
+
+**Word highlight.** Every clip also goes through Whisper (`@huggingface/transformers`,
+`return_timestamps: 'word'`, free and local). The recognised words are aligned back to the
+text that was sent to the TTS, so each word gets a measured start/end; these timings are
+cached with the clip (per book/page/chunk/avatar/voice, since pace differs per voice) and
+drive the amber read-along highlight from `audio.currentTime`. If Whisper is unavailable the
+highlight falls back to proportional estimates.
+
+**Facial expressions.** At the same step, the page's sentences are classified for emotion —
+locally and for free with `@huggingface/transformers` (GoEmotions, ONNX, downloaded once), or
+via OpenAI when `OPENAI_API_KEY` is set — and turned into a timeline that is cached per
+book page (not per avatar). The avatar's render loop blends `happy / angry / sad / relaxed /
+surprised` toward that timeline, capped at 0.6 and eased more slowly than the mouth, on top
+of the untouched lip-sync and blink layers. Speed (0.75× – 2×) is a
 playback-rate change, so it's instant and doesn't invalidate the cache.
 
 ## Supabase mode (optional)

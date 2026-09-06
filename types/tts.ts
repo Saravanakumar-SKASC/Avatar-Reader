@@ -7,6 +7,12 @@ export interface Viseme {
 
 export type TtsEngine = 'fish' | 'piper';
 
+/** Measured timing of one spoken word, seconds from the start of its clip. */
+export interface WordTiming {
+  start: number;
+  end: number;
+}
+
 export interface SpeakRequest {
   text: string;
   /** Registry id; defaults to the first avatar when omitted. */
@@ -18,6 +24,12 @@ export interface SpeakRequest {
 export interface SpeakResponse {
   audioBase64: string;
   visemes: Viseme[];
+  /**
+   * One entry per whitespace-separated word of the request text, from Whisper word
+   * timestamps aligned to the text. `null` when extraction was unavailable — the client
+   * then falls back to proportional estimates.
+   */
+  words: WordTiming[] | null;
   engineUsed: TtsEngine;
   avatarId: string;
   /** Fish reference_id actually sent ('' = Fish default voice). Only meaningful when engineUsed === 'fish'. */

@@ -2,8 +2,8 @@
 
 import type { SpeakResponse } from '@/types/tts';
 
-export type Clip = Pick<SpeakResponse, 'audioBase64' | 'visemes'> & {
-  meta: Omit<SpeakResponse, 'audioBase64' | 'visemes'>;
+export type Clip = Pick<SpeakResponse, 'audioBase64' | 'visemes' | 'words'> & {
+  meta: Omit<SpeakResponse, 'audioBase64' | 'visemes' | 'words'>;
 };
 
 // CLAUDE.md rule 2: never regenerate audio for a combo that's already cached.
@@ -17,8 +17,12 @@ const memory = new Map<string, Clip>();
 function openDb(): Promise<IDBDatabase | null> {
   return new Promise((resolve) => {
     try {
-      const req = indexedDB.open(DB_NAME, 1);
-      req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+      const req = indexedDB.open(DB_NAME, 2);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
+        if (!db.objectStoreNames.contains('emotions')) db.createObjectStore('emotions');
+      };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
     } catch {

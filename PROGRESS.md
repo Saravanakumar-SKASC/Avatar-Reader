@@ -761,3 +761,165 @@
 
 **Files changed**
 - `components/book/BookViewer.tsx`, `app/(reader)/read/[bookId]/page.tsx`, `app/globals.css`
+
+## 2026-09-06 — Emotional facial expressions from text sentiment
+
+**Note:** the prompt referenced three pasted code blocks that did not arrive; the
+implementations below were written to the stated spec.
+
+**What was built**
+1. `lib/emotion/classify-local.ts` — default, free, local. `@huggingface/transformers` 4.2
+   (`pipeline('text-classification', 'SamLowe/roberta-base-go_emotions-onnx', { dtype: 'q8' })`,
+   lazy singleton, ~130 MB quantized weights downloaded once to `EMOTION_MODEL_CACHE`,
+   default `./.cache/transformers`, git-ignored). GoEmotions' 28 labels are mapped onto the
+   five VRM expressions (`reduceLabels`: sums top-5 scores per target, neutral below 0.25).
+   Measured: 7 s first load, ~5 ms per sentence after.
+2. `lib/emotion/classify-openai.ts` — optional; used only when `OPENAI_API_KEY` is set.
+   Plain `fetch` to Chat Completions (`gpt-4o-mini`, temperature 0, strict JSON schema, one
+   label per sentence). Falls back to local on any error.
+3. `app/api/emotion/route.ts` — POST `{ sentences[] }` → `{ labels[], engine }` (max 200).
+   Timeline building: `lib/emotion/timeline.ts` — `splitSentences` (same tokenisation as the
+   TTS chunker, so word indices line up), `buildTimeline` → `[{ startWord, endWord, emotion,
+   score }]` (duration ∝ words by construction), `cuesForChunk` projects it onto one audio
+   clip as `[{ start, end, emotion, score }]` in fractions of the clip's duration using the
+   chunk's word-timing fractions. The reader fires classification in the same run that
+   fetches audio/visemes and prefetches the next page's emotions too.
+4. Cache: `lib/emotion/page-emotions.ts` — memory + IndexedDB `emotions` store, key
+   `bookId:pageId:textHash` — **no avatar in the key**; every avatar reading the page reuses
+   it. In-flight de-dupe. (`clip-cache.ts` bumped the DB to v2 to add the store.)
+5. `components/avatar/useEmotion.ts` — one more `useFrame` layer registered right after
+   `useLipSync` and before `vrm.update` (viseme and blink hooks untouched). Picks the cue at
+   `audio.currentTime / duration`, eases `happy/angry/sad/relaxed/surprised` toward
+   `min(0.6, score·0.6 + 0.2)` with `delta * 4` (mouth uses 12) so moods hold across a
+   sentence; paused/ended/no audio → all ease to 0. Placeholder figure got eyebrows that
+   tilt (angry/sad) or lift (surprised) so the layer is visible without a VRM.
+   `AvatarCanvas` takes `emotionCues`; the reader publishes cues per clip and refreshes them
+   if the timeline arrives mid-clip (audio is never blocked on classification).
+- `next.config.mjs`: `@huggingface/transformers`, `onnxruntime-node` added to server externals.
+- `vitest.config.mts`: `@` alias (needed once lib code imported via `@/`).
+- `tests/emotion.test.ts` — sentence splitting, label reduction, timeline→cue projection
+  (whole-chunk and mid-sentence chunk). 25 tests total.
+
+**Verified**
+- `npm run build` (isolated) clean; `tsc` + `lint` clean; `npm test` 25 passing.
+- Live `/api/emotion` on the dev server: "She laughed out loud and hugged him." → happy 0.99,
+  "He slammed the door and cursed." → angry 0.41, "The report is due on Monday." → neutral,
+  "What on earth is that noise?" → surprised 0.90; `engine: local`, 0.8 s round-trip warm.
+- Not verified in a browser: the expressions on the VRMs (all seven have the presets), the
+  blend cap interacting with mouth shapes, and OpenAI path (no key set).
+
+**Files changed**
+- New: `lib/emotion/{types,classify-local,classify-openai,timeline,page-emotions}.ts`,
+  `app/api/emotion/route.ts`, `components/avatar/useEmotion.ts`, `tests/emotion.test.ts`
+- Changed: `components/avatar/AvatarCanvas.tsx`, `app/(reader)/read/[bookId]/page.tsx`,
+  `lib/clip-cache.ts`, `next.config.mjs`, `vitest.config.mts`, `.gitignore`,
+  `.env.local.example`, `.env.local` (local), `README.md`, `package.json` (+@huggingface/transformers)
+
+**How to test**
+- Restart `npm run dev` (next.config changed). Open the demo book and play: on "She wept…"
+  style lines the face should soften/sadden, on exclamations widen, on cheerful lines smile —
+  gently (≤ 0.6) and lagging a beat behind the words, never twitching per syllable.
+- Switch avatars mid-page: no new `/api/emotion` call in the Network tab (page-level cache).
+- Reload and replay: still no classification call (IndexedDB).
+- Set `OPENAI_API_KEY` in `.env.local`, restart → `/api/emotion` responds `engine: "openai"`.
+
+## 2026-09-06 — Book viewer: stretch sizing, real covers, physical-book styling
+
+**Note:** the prompt referenced pasted CoverPage/BackCoverPage, props and CSS blocks that did
+not arrive; the implementation below was written to the stated spec.
+
+**What changed**
+1. **`size="stretch"`.** `HTMLFlipBook` now gets `width/height` 480×640 as the page *ratio*,
+   `minWidth 320 / maxWidth 760` and matching min/max heights, `autoSize={false}`. In stretch
+   mode page-flip sizes pages from its parent's width *and* clamps to its height, so the new
+   `components/book/BookFrame.tsx` measures the stage and gives the flip-book a container of
+   exactly the size page-flip will use (`lib/book-metrics.ts › computeMetrics` mirrors
+   page-flip's `calculateBoundsRect`; tested). Page *content* stays a fixed 480×640 layer
+   scaled by a `--page-scale` CSS variable, so `lib/paginate` remains exact at every size.
+   On container changes (sidebar toggle) the viewer calls `pageFlip().update()`.
+   `ScaleToFit.tsx` removed.
+2. **Covers.** `CoverPage` (hard) is the first leaf: leather gradient, gilt double border
+   (`border` + offset `outline`), ❦ ornament, centred title (balanced wrap), italic author
+   when the row has one, "Avatar Reader" imprint. `BackCoverPage` (hard) closes the book with
+   "The End" + title. Title/author come from the book row (`books.title` / `books.author`;
+   local mode stores the same shape). Text pages therefore sit at flip index `page + 1`;
+   `onFlip` ignores the covers so the reader's `currentPage` only ever points at real text.
+   First visit (no saved position) opens on the cover and flips in when reading starts;
+   returning visits open on the saved page.
+3. **Interior.** Justified serif text with `hyphens: auto`; spine-aware padding — 44 px on
+   the gutter side, 28 px on the outer edge (still 72 px total, matching `PAGE_BOX`); a soft
+   inset gutter shadow per side; folio number on the outer corner; rounded outer corners
+   per leaf; the whole book wrapped in `.book` with a layered `drop-shadow` (so the
+   turning page is not clipped) and 8 px radius. Portrait mode uses symmetric padding.
+4. **`drawShadow` kept** (and `maxShadowOpacity 0.5`).
+
+**Verified**
+- `npm run build` (isolated) clean; `tsc` + `lint` clean; `npm test` → 29 passing
+  (`tests/book-frame.test.ts`: landscape height-limited, width-limited, portrait switch, maxWidth cap).
+- Dev server: `/read/new` 200; compiled CSS contains `cover__title`, `leaf--left`,
+  `book-frame--portrait`, `page-scale`.
+- Not verified in a browser: the look of the covers and gutters, hard-cover flip feel, that
+  the `--page-scale` layer lines up with page-flip's computed page size at odd stage sizes.
+
+**Files changed**
+- New: `components/book/BookFrame.tsx`, `lib/book-metrics.ts`, `tests/book-frame.test.ts`
+- Rewritten: `components/book/BookViewer.tsx`
+- Changed: `app/(reader)/read/[bookId]/page.tsx`, `app/globals.css`
+- Removed: `components/book/ScaleToFit.tsx`
+
+**How to look at it**
+- Open a book fresh (or "Open another PDF"): it rests on the cover — title centred inside a
+  gold double border. Click Play or an avatar: the cover turns and reading starts on page 1.
+- Toggle the library («/»): the book re-fits the stage; text stays crisp and un-clipped.
+- Narrow the window: single-page portrait with symmetric margins. Widen: two-page spread with
+  the wider margin on the spine side and the folio on the outer corner.
+- Flip to the very end: "The End" back cover; flipping onto it doesn't change the page counter.
+
+## 2026-09-06 — Measured word timestamps for the read-along highlight (Whisper)
+
+**Note:** the prompt referenced pasted extraction/PageText code that did not arrive; written
+to the stated spec. Item 3 (one `<span>` per word) was already in place from the read-along
+work; the change here is replacing *estimated* word timing with *measured* timing.
+
+**What was built**
+1. `lib/timing/extract-word-timestamps.ts` — server-only; `@huggingface/transformers`
+   `pipeline('automatic-speech-recognition', 'onnx-community/whisper-tiny.en_timestamped',
+   { dtype: 'q8' })` with `return_timestamps: 'word'`. The plain `whisper-tiny.en` export
+   lacks cross-attention outputs and throws for word timestamps — the `_timestamped` exports
+   are required (env `WHISPER_MODEL` to swap; `WORD_TIMESTAMPS=off` to disable).
+   `lib/timing/wav-decode.ts` parses PCM WAV (8/16/24/32-bit, float, streaming size
+   placeholders) and resamples to 16 kHz mono. `lib/timing/align.ts › alignWords` does an
+   LCS-style monotonic alignment of Whisper's words to the words actually sent to the TTS
+   (normalised; prefix / 1-edit fuzzy match), takes Whisper's timestamps for matches and
+   interpolates unmatched runs by character weight, then enforces monotonic order — so
+   every source word has a `[start, end)` even when Whisper mishears.
+2. `/api/speak` runs Rhubarb and Whisper in parallel on the same WAV and returns
+   `words: WordTiming[] | null` alongside `visemes`. The client stores it in the clip cache —
+   **per (book, page, chunk, avatar, voice, text)**, the same key as the audio, because pace
+   differs per voice. `null` on any extraction failure (logged server-side).
+3. Page rendering: unchanged — `TextPage` already renders `<span data-w={i}>` per word.
+4. `wordAtTime(words, t)` (binary search) — the reader's rAF loop uses it with
+   `audio.currentTime` when the clip has measured words (and the count matches the chunk),
+   else the old proportional `wordAtFraction`. Highlight classes are applied as before.
+- `tests/align.test.ts` — matched, misheard/missing, nothing-recognised, normalisation,
+  `wordAtTime`. 34 tests total.
+
+**Verified**
+- Probe: 2 s Fish clip → Whisper loads in ~4 s, transcribes in 0.8 s, word boundaries
+  correct ("Hello." 0.52–0.86, "This" 1.04–1.24, …).
+- Live `/api/speak` (dev server): 14-word sentence → `words: 14`, monotonic, sentence gap
+  visible (1.84 → 2.08 s), whole call (Fish + Rhubarb + Whisper) ~3.0 s.
+- `npm run build` (isolated) clean; `tsc` + `lint` clean; `npm test` 34 passing.
+- Not verified in a browser: the highlight tracking speech by ear.
+
+**Files changed**
+- New: `lib/timing/{extract-word-timestamps,wav-decode,align}.ts`, `tests/align.test.ts`
+- Changed: `app/api/speak/route.ts`, `types/tts.ts`, `lib/clip-cache.ts`,
+  `app/(reader)/read/[bookId]/page.tsx`, `.env.local.example`, `.env.local` (local), `README.md`
+
+**How to test**
+- Clear the old clip cache once so clips are regenerated with timings: DevTools →
+  Application → IndexedDB → `avatar-reader` → `clips` → clear (or open a new book).
+- Play a page: the amber word should now land exactly on the spoken word, including the
+  pause after full stops. Change speed to 2×: still in step (timings are in media time).
+- Set `WORD_TIMESTAMPS=off`, restart, clear cache, play: highlight reverts to the estimate.

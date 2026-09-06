@@ -11,6 +11,8 @@ import type { Viseme } from '@/types/tts';
 import { useBlink } from './useBlink';
 import { useLipSync, type LipSyncSource } from './useLipSync';
 import { MOUTH_OPENNESS } from './lipsync';
+import { useEmotion, type EmotionSource } from './useEmotion';
+import type { EmotionCue } from '@/lib/emotion/types';
 
 /** Subtle breathing bob + sway so the avatar never looks frozen. */
 function useIdle(group: React.RefObject<THREE.Group>) {
@@ -54,13 +56,15 @@ function eyeHeight(vrm: VRM): number {
 
 // ---------- Real VRM ----------
 
-function VrmModel({ vrm, lipSync }: { vrm: VRM; lipSync: LipSyncSource }) {
+function VrmModel({ vrm, lipSync, emotion }: { vrm: VRM; lipSync: LipSyncSource; emotion: EmotionSource }) {
   const group = useRef<THREE.Group>(null);
   const [headY] = useState(() => eyeHeight(vrm));
   useIdle(group);
 
   useBlink((w) => vrm.expressionManager?.setValue('blink', w));
   useLipSync(lipSync, (shape, w) => vrm.expressionManager?.setValue(shape, w));
+  // Mood layer: happy/angry/sad/relaxed/surprised, capped at 0.6 so the mouth shapes stay readable.
+  useEmotion(emotion, (e, w) => vrm.expressionManager?.setValue(e, w));
 
   // Must run after the blink/lip-sync frames above: vrm.update applies expression weights.
   useFrame((_, delta) => vrm.update(delta));
@@ -75,13 +79,30 @@ function VrmModel({ vrm, lipSync }: { vrm: VRM; lipSync: LipSyncSource }) {
 
 // ---------- Placeholder (no .vrm on disk yet) ----------
 
-function PlaceholderModel({ avatar, lipSync }: { avatar: Avatar; lipSync: LipSyncSource }) {
+function PlaceholderModel({
+  avatar,
+  lipSync,
+  emotion,
+}: {
+  avatar: Avatar;
+  lipSync: LipSyncSource;
+  emotion: EmotionSource;
+}) {
   const group = useRef<THREE.Group>(null);
   const leftEye = useRef<THREE.Mesh>(null);
   const rightEye = useRef<THREE.Mesh>(null);
   const mouth = useRef<THREE.Mesh>(null);
   const mouthWeights = useRef<Record<string, number>>({});
+  const brows = useRef<THREE.Group>(null);
   useIdle(group);
+
+  // Placeholder mood: brows tilt (angry / sad) or lift (surprised).
+  useEmotion(emotion, (e, w) => {
+    if (!brows.current) return;
+    if (e === 'angry') brows.current.rotation.z = -0.5 * w;
+    if (e === 'sad') brows.current.rotation.z = 0.5 * w;
+    if (e === 'surprised') brows.current.position.y = 0.05 * w;
+  });
 
   useLipSync(lipSync, (shape, w) => {
     mouthWeights.current[shape] = w;
@@ -113,6 +134,17 @@ function PlaceholderModel({ avatar, lipSync }: { avatar: Avatar; lipSync: LipSyn
         <sphereGeometry args={[0.32, 32, 32]} />
         <meshStandardMaterial color="#f5d0b5" />
       </mesh>
+      {/* brows (mood) */}
+      <group ref={brows}>
+        <mesh position={[-0.11, 1.48, 0.27]} rotation={[0, 0, 0.15]}>
+          <boxGeometry args={[0.1, 0.015, 0.02]} />
+          <meshStandardMaterial color="#3b2a1e" />
+        </mesh>
+        <mesh position={[0.11, 1.48, 0.27]} rotation={[0, 0, -0.15]}>
+          <boxGeometry args={[0.1, 0.015, 0.02]} />
+          <meshStandardMaterial color="#3b2a1e" />
+        </mesh>
+      </group>
       {/* eyes */}
       <mesh ref={leftEye} position={[-0.11, 1.4, 0.28]}>
         <sphereGeometry args={[0.045, 16, 16]} />
@@ -140,7 +172,7 @@ function PlaceholderModel({ avatar, lipSync }: { avatar: Avatar; lipSync: LipSyn
 
 type LoadState = { status: 'loading' } | { status: 'vrm'; vrm: VRM } | { status: 'placeholder' };
 
-function AvatarModel({ avatar, lipSync }: { avatar: Avatar; lipSync: LipSyncSource }) {
+function AvatarModel({ avatar, lipSync, emotion }: { avatar: Avatar; lipSync: LipSyncSource; emotion: EmotionSource }) {
   const [state, setState] = useState<LoadState>({ status: 'loading' });
 
   useEffect(() => {
@@ -192,8 +224,8 @@ function AvatarModel({ avatar, lipSync }: { avatar: Avatar; lipSync: LipSyncSour
       </Html>
     );
   }
-  if (state.status === 'vrm') return <VrmModel vrm={state.vrm} lipSync={lipSync} />;
-  return <PlaceholderModel avatar={avatar} lipSync={lipSync} />;
+  if (state.status === 'vrm') return <VrmModel vrm={state.vrm} lipSync={lipSync} emotion={emotion} />;
+  return <PlaceholderModel avatar={avatar} lipSync={lipSync} emotion={emotion} />;
 }
 
 // ---------- WebGL availability + error containment ----------
@@ -245,15 +277,19 @@ export default function AvatarCanvas({
   avatar,
   className,
   visemes,
+  emotionCues,
   audioRef,
 }: {
   avatar: Avatar;
   className?: string;
   /** Rhubarb cues for the audio currently in `audioRef`; [] = mouth at rest. */
   visemes: Viseme[];
+  /** Emotion cues for the same clip; [] = neutral face. */
+  emotionCues?: EmotionCue[];
   audioRef: RefObject<HTMLAudioElement | null>;
 }) {
   const lipSync: LipSyncSource = { visemes, audioRef };
+  const emotion: EmotionSource = { cues: emotionCues ?? [], audioRef };
   const [webgl, setWebgl] = useState<boolean | null>(null);
   useEffect(() => setWebgl(webglAvailable()), []);
 
@@ -275,7 +311,7 @@ export default function AvatarCanvas({
             <directionalLight position={[2, 4, 3]} intensity={1.2} />
             <Suspense fallback={null}>
               {/* key forces a clean remount when the avatar changes */}
-              <AvatarModel key={avatar.id} avatar={avatar} lipSync={lipSync} />
+              <AvatarModel key={avatar.id} avatar={avatar} lipSync={lipSync} emotion={emotion} />
             </Suspense>
           </Canvas>
         </CanvasErrorBoundary>
