@@ -56,3 +56,42 @@
   page count and per-page text appear below the form.
 - CLI: `curl -X POST -F "file=@tests/fixtures/sample.pdf" http://localhost:3000/api/extract`
   returns `{"pageCount":2,"pages":["Hello from page one","Hello from page two"]}`.
+
+## 2026-09-06 — Phase 2: Book-flip reading UI (no audio)
+
+**What was built**
+- `components/book/BookViewer.tsx` — client component wrapping `react-pageflip`
+  (`HTMLFlipBook`, 480×640, `showCover`). Takes `pages`, `currentPage`, and an optional
+  `onFlip` callback so drag/click flips report back to the parent. A `useEffect` calls
+  `pageFlip().flip(currentPage)` when the prop changes (skipped if already on that page).
+  - `react-pageflip`'s `IFlipSetting` declares every setting as required, so all settings
+    are passed explicitly (page-flip defaults). `page-flip` ships no typings; a minimal
+    `PageFlipApi` interface types the ref instead of `any`.
+- `app/(reader)/read/[bookId]/page.tsx` — client page at `/read/<bookId>`. Loads the book,
+  renders `BookViewer` via `next/dynamic` with `ssr: false` (react-pageflip touches
+  `window`), and provides Prev/Next buttons, a "Page X of N" counter, and ←/→ keyboard
+  navigation. Shows "Book not found" with a link to `/upload` for unknown ids.
+- `lib/book-store.ts` + `types/book.ts` — `saveBook(name, pages)` / `loadBook(id)` backed
+  by `localStorage` (key `avatar-reader:book:<uuid>`). Temporary until Supabase lands;
+  books exist only in the browser that uploaded them.
+- `app/(reader)/upload/page.tsx` — on successful extraction it now saves the book and
+  navigates to `/read/<bookId>` instead of rendering the raw text inline.
+- No audio, no avatar, no Supabase.
+
+**Known limitation**
+- Page text is not re-flowed to fit the 480×640 page; long PDF pages are clipped
+  (`overflow-hidden`). Pagination/re-flow is deferred.
+
+**Files changed**
+- `components/book/BookViewer.tsx`, `app/(reader)/read/[bookId]/page.tsx`,
+  `lib/book-store.ts`, `types/book.ts` (new)
+- `app/(reader)/upload/page.tsx` (save + redirect)
+- Removed `components/book/.gitkeep`, `types/.gitkeep`
+
+**How to verify**
+- `npm run build` → zero errors; route table shows `ƒ /read/[bookId]`.
+- `npm test` → still 1 passing.
+- `npm run dev`, open http://localhost:3000/upload, choose a PDF, click "Open as book".
+  You land on `/read/<uuid>` with a flip-book: drag a page corner or click a page edge to
+  flip; Prev/Next buttons and arrow keys move pages; the counter stays in sync with drags.
+- Open `/read/does-not-exist` → "Book not found" with an upload link.
