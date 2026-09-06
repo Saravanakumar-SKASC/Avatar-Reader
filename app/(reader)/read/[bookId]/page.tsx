@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { loadBook } from '@/lib/book-store';
 import { DEFAULT_AVATAR_ID, getAvatar } from '@/lib/avatars';
 import AvatarPicker from '@/components/avatar/AvatarPicker';
+import VoiceOverride from '@/components/avatar/VoiceOverride';
 import type { StoredBook } from '@/types/book';
 import type { SpeakResponse } from '@/types/tts';
 import type { AvatarId } from '@/types/avatar';
@@ -15,12 +16,14 @@ const BookViewer = dynamic(() => import('@/components/book/BookViewer'), { ssr: 
 const AvatarCanvas = dynamic(() => import('@/components/avatar/AvatarCanvas'), { ssr: false });
 
 const AVATAR_STORAGE_KEY = 'avatar-reader:avatar';
+const VOICE_STORAGE_KEY = 'avatar-reader:voice-override';
 
 export default function ReadPage({ params }: { params: { bookId: string } }) {
   const [book, setBook] = useState<StoredBook | null | undefined>(undefined);
   const [currentPage, setCurrentPage] = useState(0);
   const [speaking, setSpeaking] = useState(false);
-  const [engineUsed, setEngineUsed] = useState<SpeakResponse['engineUsed'] | null>(null);
+  const [lastSpeak, setLastSpeak] = useState<Omit<SpeakResponse, 'audioBase64' | 'visemes'> | null>(null);
+  const [voiceOverride, setVoiceOverride] = useState('');
   const [speakError, setSpeakError] = useState<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [avatarId, setAvatarId] = useState<AvatarId>(DEFAULT_AVATAR_ID);
@@ -31,8 +34,16 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
     try {
       const saved = localStorage.getItem(AVATAR_STORAGE_KEY);
       if (saved) setAvatarId(getAvatar(saved).id);
+      setVoiceOverride(localStorage.getItem(VOICE_STORAGE_KEY) ?? '');
     } catch {}
   }, [params.bookId]);
+
+  function changeVoiceOverride(referenceId: string) {
+    setVoiceOverride(referenceId);
+    try {
+      localStorage.setItem(VOICE_STORAGE_KEY, referenceId);
+    } catch {}
+  }
 
   function selectAvatar(id: AvatarId) {
     setAvatarId(id);
@@ -49,21 +60,26 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
     audioRef.current?.pause();
     setSpeaking(true);
     setSpeakError(null);
-    setEngineUsed(null);
+    setLastSpeak(null);
 
     try {
       const res = await fetch('/api/speak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: book.pages[currentPage] }),
+        body: JSON.stringify({
+          text: book.pages[currentPage],
+          avatarId,
+          voiceOverride: voiceOverride || undefined,
+        }),
       });
       const body = await res.json();
       if (!res.ok) {
         const detail = [body.fish, body.piper].filter(Boolean).join(' | ');
         throw new Error(detail ? `${body.error}: ${detail}` : body.error ?? `Request failed (${res.status})`);
       }
-      const { audioBase64, engineUsed: engine } = body as SpeakResponse;
-      setEngineUsed(engine);
+      const { audioBase64, engineUsed, avatarId: spokenId, fishReferenceId, emotionTag } =
+        body as SpeakResponse;
+      setLastSpeak({ engineUsed, avatarId: spokenId, fishReferenceId, emotionTag });
 
       const audio = new Audio(`data:audio/wav;base64,${audioBase64}`);
       audioRef.current = audio;
@@ -150,9 +166,15 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
         >
           {speaking ? 'Speaking…' : '▶ Play page'}
         </button>
-        {engineUsed && (
+        <VoiceOverride value={voiceOverride} onChange={changeVoiceOverride} />
+        {lastSpeak && (
           <span className="text-xs text-gray-400">
-            engine: {engineUsed === 'fish' ? 'Fish Audio' : 'Piper (local fallback)'}
+            {getAvatar(lastSpeak.avatarId).name} ·{' '}
+            {lastSpeak.engineUsed === 'fish'
+              ? `Fish Audio · voice ${lastSpeak.fishReferenceId || 'default'}${
+                  lastSpeak.emotionTag ? ` · ${lastSpeak.emotionTag}` : ''
+                }`
+              : `Piper (local fallback) · ${avatar.piperVoice}`}
           </span>
         )}
         {speakError && <p className="max-w-md text-center text-sm text-red-400">{speakError}</p>}

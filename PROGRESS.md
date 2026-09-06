@@ -265,3 +265,48 @@
 
 **Files changed**
 - `components/avatar/AvatarCanvas.tsx`
+
+## 2026-09-06 — Phase 5: Per-avatar Fish voice + emotion tag, voice override
+
+**What was built**
+- `app/api/speak/route.ts` — body is now `{ text, avatarId?, voiceOverride? }`
+  (`types/tts.ts` → `SpeakRequest`). Looks the avatar up in `lib/avatars.ts`
+  (400 on unknown id; defaults to `alex` if omitted). Fish gets
+  `reference_id = voiceOverride || avatar.fishReferenceId` and the literal text with the
+  avatar's inline tag prepended, e.g. `"[excited] Once upon a time"` — no SSML. Piper
+  fallback ignores the tag and uses `avatar.piperVoice` (+ `--speaker N` when
+  `piperSpeaker` is set, e.g. Zara on `en_US-libritts_r-medium`). Response now also carries
+  `avatarId`, `fishReferenceId` and `emotionTag` actually used.
+- `lib/avatars.ts` — `withEmotionTag(tag, text)`, `fishVoiceOptions()` (distinct non-empty
+  reference_ids from the registry, for the dropdown).
+- `lib/tts/piper.ts` — optional `speaker` arg; checks the `.onnx` exists first and throws a
+  clear "voice model not found: <path>" instead of an opaque Piper exit code.
+- `components/avatar/VoiceOverride.tsx` — "Voice" dropdown: *Avatar default*, one entry per
+  registry voice, and *Custom reference_id…* which reveals a text input. Persisted in
+  `localStorage` (`avatar-reader:voice-override`). Since all registry reference_ids are still
+  `''`, the list currently shows only *Avatar default* + *Custom* — it fills in as ids are added.
+- Reader page — Play sends `avatarId` (the picker selection) and `voiceOverride`; the
+  status line shows avatar · engine · voice · tag. Switching avatars now changes model,
+  voice and emotion delivery together.
+- Piper voice models downloaded for every avatar into `~/piper-voices/`
+  (amy, alan, lessac, libritts_r, joe; ~330 MB total) so the fallback works for all 7.
+- `tests/avatars.test.ts` — `withEmotionTag` + registry sanity (3 tests).
+
+**Verified (live dev server, fresh Fish key)**
+- `luna` → `engineUsed: fish`, `emotionTag: "[calm]"`, 12 visemes.
+- `zara` + bogus `voiceOverride` → Fish 4xx → `engineUsed: piper` on libritts_r speaker 0,
+  9 visemes (fallback path incl. multi-speaker flag).
+- unknown `avatarId` → 400. `npm run build` (isolated copy) clean; `npm test` 7 passing.
+- Not verified by ear: whether Fish honours `[calm]` / `[cheerful]` / `[friendly]`.
+  CLAUDE.md lists them as untested — if a tag is spoken aloud or has no effect, blank it
+  in the registry.
+
+**Still open**
+- All 7 `fishReferenceId` values are placeholders (`''` → Fish default voice). Fill them
+  from fish.audio/voice-library; the override dropdown is the quick way to audition ids.
+- Supabase caching (rule 2) still not implemented — each Play re-synthesizes.
+
+**Files changed**
+- `app/api/speak/route.ts`, `lib/avatars.ts`, `lib/tts/piper.ts`, `types/tts.ts`,
+  `app/(reader)/read/[bookId]/page.tsx`
+- `components/avatar/VoiceOverride.tsx`, `tests/avatars.test.ts` (new)

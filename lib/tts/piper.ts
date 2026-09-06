@@ -1,7 +1,7 @@
 // Server-only. Runs the self-hosted Piper binary; zero cost, no account.
 
 import { spawn } from 'child_process';
-import { readFile, unlink } from 'fs/promises';
+import { access, readFile, unlink } from 'fs/promises';
 import { randomUUID } from 'crypto';
 import { homedir, tmpdir } from 'os';
 import path from 'path';
@@ -15,12 +15,26 @@ export function piperModelPath(voice: string): string {
   return path.join(dir, `${voice}.onnx`);
 }
 
-export async function synthesizeWithPiper(text: string, voice: string): Promise<Buffer> {
+export async function synthesizeWithPiper(
+  text: string,
+  voice: string,
+  speaker?: number
+): Promise<Buffer> {
   const bin = expandHome(process.env.PIPER_PATH ?? 'piper');
+  const model = piperModelPath(voice);
   const outPath = path.join(tmpdir(), `${randomUUID()}.wav`);
 
+  try {
+    await access(model);
+  } catch {
+    throw new Error(`Piper voice model not found: ${model} (see SETUP.md to download it)`);
+  }
+
+  const args = ['--model', model, '--output_file', outPath];
+  if (speaker !== undefined) args.push('--speaker', String(speaker));
+
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(bin, ['--model', piperModelPath(voice), '--output_file', outPath]);
+    const child = spawn(bin, args);
     let stderr = '';
     child.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
     child.on('error', (err) => reject(new Error(`Piper failed to start (${bin}): ${err.message}`)));
