@@ -1,8 +1,10 @@
 import type { Avatar, AvatarId } from '@/types/avatar';
 
-// Registry from CLAUDE.md. Fish reference_ids are placeholders — fill in from
-// fish.audio/voice-library. Emotion tags other than excited/happy/sad/angry/laughing
-// are untested; drop any that has no audible effect.
+// Registry from CLAUDE.md. Fish reference_ids are public voices from fish.audio/voice-library,
+// chosen by hand; to swap one, copy the id shown on the voice's page (the Voice dropdown's
+// "Custom" option lets you audition an id before committing it here).
+// Emotion tags other than excited/happy/sad/angry/laughing are untested; drop any that
+// has no audible effect.
 const BASE: Omit<Avatar, 'vrmUrl' | 'thumbnailUrl'>[] = [
   { id: 'alex', name: 'Alex', personality: 'Friendly', fishReferenceId: '711cf3ed00ab441a8f54a45058047b7a', emotionTag: '[friendly]', piperVoice: 'en_US-ryan-high', color: '#3b82f6' },
   { id: 'luna', name: 'Luna', personality: 'Calm', fishReferenceId: '933563129e564b19a115bedd57b7406a', emotionTag: '[calm]', piperVoice: 'en_US-amy-medium', color: '#8b5cf6' },

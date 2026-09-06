@@ -15,7 +15,11 @@ interface FlipBookHandle {
 
 export interface WordHighlight {
   page: number;
+  /** Word being spoken right now. */
   word: number;
+  /** Words of the phrase (TTS chunk) currently being read: [from, to). */
+  from: number;
+  to: number;
 }
 
 interface BookViewerProps {
@@ -30,50 +34,69 @@ interface BookViewerProps {
 }
 
 /**
- * One page. Memoised so re-renders caused by the moving highlight only touch the page
- * that is actually being read. react-pageflip attaches a ref to each child, hence forwardRef.
+ * One page. Static content: react-pageflip keeps its own copy of these elements and (with
+ * `renderOnlyPageLengthChange`) never re-renders them, so the highlight is applied to the
+ * DOM imperatively via the data attributes below — see the effect in BookViewer.
+ * react-pageflip attaches a ref to each child, hence forwardRef.
  */
 const BookPage = memo(
-  forwardRef<HTMLDivElement, { text: string; index: number; total: number; activeWord: number | null }>(
-    function BookPage({ text, index, total, activeWord }, ref) {
-      const words = useMemo(() => tokenizeWords(text), [text]);
-      const activeRef = useRef<HTMLSpanElement>(null);
-
-      // Keep the spoken word in view on long pages.
-      useEffect(() => {
-        activeRef.current?.scrollIntoView({ block: 'nearest' });
-      }, [activeWord]);
-
-      return (
-        <div ref={ref} className="page relative overflow-hidden bg-[#f5efe3] p-8 shadow-inner">
-          <p className="font-serif leading-relaxed text-gray-900">
-            {words.length === 0
-              ? '(no text on this page)'
-              : words.map((w, i) => (
-                  <span
-                    key={i}
-                    ref={i === activeWord ? activeRef : undefined}
-                    className={
-                      i === activeWord
-                        ? 'rounded bg-amber-300/80 px-0.5 -mx-0.5 transition-colors duration-150'
-                        : undefined
-                    }
-                  >
-                    {w}{' '}
-                  </span>
-                ))}
-          </p>
-          <span className="absolute bottom-4 right-6 text-xs text-gray-400">
-            {index + 1} / {total}
-          </span>
-        </div>
-      );
-    }
-  )
+  forwardRef<HTMLDivElement, { text: string; index: number; total: number }>(function BookPage(
+    { text, index, total },
+    ref
+  ) {
+    const words = useMemo(() => tokenizeWords(text), [text]);
+    return (
+      <div
+        ref={ref}
+        data-page={index}
+        className="page relative overflow-hidden bg-[#f6f0e4] text-gray-900 shadow-inner"
+        style={{ padding: 36 }}
+      >
+        {/* Font/line-height MUST match lib/paginate PAGE_BOX so text never overflows. */}
+        <p style={{ font: "15px Georgia, 'Times New Roman', serif", lineHeight: '24px', margin: 0 }}>
+          {words.length === 0
+            ? '(no text on this page)'
+            : words.map((w, i) => (
+                <span key={i} data-w={i} className="read-word">
+                  {w}{' '}
+                </span>
+              ))}
+        </p>
+        <span className="absolute bottom-3 right-5 text-xs text-gray-400" style={{ font: '11px Georgia, serif' }}>
+          {index + 1} / {total}
+        </span>
+      </div>
+    );
+  })
 );
 
 export default function BookViewer({ pages, currentPage, onFlip, highlight, orientation = 'landscape' }: BookViewerProps) {
   const bookRef = useRef<FlipBookHandle | null>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const marked = useRef<Element[]>([]);
+
+  // Apply the highlight straight to the DOM (page-flip may also clone a page mid-flip; both
+  // copies get the classes because we query every matching node).
+  useEffect(() => {
+    for (const el of marked.current) el.classList.remove('read-word--phrase', 'read-word--now');
+    marked.current = [];
+    const root = wrapRef.current;
+    if (!root || !highlight) return;
+    const pageEls = root.querySelectorAll<HTMLElement>(`[data-page="${highlight.page}"]`);
+    pageEls.forEach((pageEl) => {
+      for (let w = highlight.from; w < highlight.to; w++) {
+        const el = pageEl.querySelector(`[data-w="${w}"]`);
+        if (!el) continue;
+        el.classList.add('read-word--phrase');
+        marked.current.push(el);
+      }
+      const now = pageEl.querySelector(`[data-w="${highlight.word}"]`);
+      if (now) {
+        now.classList.add('read-word--now');
+        marked.current.push(now);
+      }
+    });
+  }, [highlight]);
 
   useEffect(() => {
     const api = bookRef.current?.pageFlip();
@@ -83,6 +106,7 @@ export default function BookViewer({ pages, currentPage, onFlip, highlight, orie
   }, [currentPage]);
 
   return (
+    <div ref={wrapRef}>
     <HTMLFlipBook
       key={orientation} // page-flip picks orientation from its container width at init
       ref={bookRef}
@@ -113,14 +137,9 @@ export default function BookViewer({ pages, currentPage, onFlip, highlight, orie
       onFlip={(e: { data: number }) => onFlip?.(e.data)}
     >
       {pages.map((text, i) => (
-        <BookPage
-          key={i}
-          text={text}
-          index={i}
-          total={pages.length}
-          activeWord={highlight && highlight.page === i ? highlight.word : null}
-        />
+        <BookPage key={i} text={text} index={i} total={pages.length} />
       ))}
     </HTMLFlipBook>
+    </div>
   );
 }

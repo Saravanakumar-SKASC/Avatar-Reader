@@ -82,8 +82,14 @@ export const localStore: BookStore = {
     return Math.max(0, read<number>(progressKey(bookId), 1) - 1);
   },
 
-  async saveProgress(bookId, pageIndex) {
+  async saveProgress(bookId, pageIndex, pageCount) {
     write(progressKey(bookId), pageIndex + 1);
+    const books = listLocalBooks();
+    const row = books.find((b) => b.id === bookId);
+    if (row && row.page_count !== pageCount) {
+      row.page_count = pageCount;
+      write(INDEX_KEY, books);
+    }
     notify();
   },
 };

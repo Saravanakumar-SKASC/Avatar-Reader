@@ -66,15 +66,18 @@ export const supabaseStore: BookStore = {
     return data ? Math.max(0, data.current_page - 1) : 0;
   },
 
-  async saveProgress(bookId, pageIndex) {
+  async saveProgress(bookId, pageIndex, pageCount) {
     const supabase = createClient();
     const {
       data: { user },
     } = await supabase.auth.getUser();
     if (!user) return;
-    await supabase.from('reading_progress').upsert(
-      { user_id: user.id, book_id: bookId, current_page: pageIndex + 1, updated_at: new Date().toISOString() },
-      { onConflict: 'user_id,book_id' }
-    );
+    await Promise.all([
+      supabase.from('reading_progress').upsert(
+        { user_id: user.id, book_id: bookId, current_page: pageIndex + 1, updated_at: new Date().toISOString() },
+        { onConflict: 'user_id,book_id' }
+      ),
+      supabase.from('books').update({ page_count: pageCount }).eq('id', bookId),
+    ]);
   },
 };

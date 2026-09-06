@@ -54,16 +54,19 @@ expression and the `aa/ih/ou/ee/oh` vowel presets) and optional thumbnails at
 `public/avatars/<id>.png`. Missing models render as a placeholder figure that still blinks
 and lip-syncs.
 
-Fish `reference_id`s ship empty (Fish's default voice). Copy real ids from
-fish.audio/voice-library; the **Voice** dropdown's *Custom* option lets you audition one.
+Each avatar has its own Fish `reference_id` from fish.audio/voice-library; the **Voice**
+dropdown's *Custom* option lets you audition another id before changing the registry.
 
 ## How playback works
 
-Each page is split into short sentence chunks. The first chunk plays as soon as it's
+PDF pages are re-flowed into book pages that fit the page box, so nothing is clipped.
+Each book page is split into short sentence chunks. The first chunk plays as soon as it's
 synthesised while the rest stream in behind it; the next page is prefetched in the
 background. Every clip is cached (memory + IndexedDB) per book/page/chunk/avatar/voice, so
 repeat plays are instant and never re-spend TTS quota. Changing page or avatar cancels
 whatever is in flight and starts the new combination — old and new audio never overlap.
+When a page finishes it advances to the next automatically. Speed (0.75× – 2×) is a
+playback-rate change, so it's instant and doesn't invalidate the cache.
 
 ## Supabase mode (optional)
 

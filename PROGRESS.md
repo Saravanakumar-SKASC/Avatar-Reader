@@ -644,3 +644,120 @@
 - Rename `public/avatars/alex.vrm` temporarily → Alex shows the placeholder labelled
   "Alex · no 3D model". Stop Fish + Piper (bad key, `PIPER_PATH=nope`) → red card with Retry.
 - Narrow the window below ~720 px → single-page book, wrapped controls, ☰ Library.
+
+## 2026-09-06 — Demo polish: collapsible library, re-flowed pages, auto-advance, speed, full-screen layout
+
+**What changed**
+1. **Library panel opens/closes** on wide screens (« / » button top-left, state remembered in
+   `localStorage`); the slide-over stays for narrow screens. `ReaderShell` is now a
+   `h-screen overflow-hidden` frame — the reader never scrolls the window.
+2. **Pages no longer clip.** `lib/paginate.ts` re-flows each PDF page's text into as many
+   480×640 book pages as needed, measuring words with a canvas 2D context using the exact
+   font string the page CSS uses (`15px Georgia, 'Times New Roman', serif`, 24 px lines,
+   36 px padding). Falls back to a char estimate outside the browser. Book page count
+   replaces PDF page count for progress % (`saveProgress` now carries the total; local and
+   Supabase stores update `page_count`). Saved positions are clamped to the new count.
+   **Auto-advance:** when a page's last chunk ends, the reader flips to the next page and
+   keeps reading until the book ends.
+3. **Voices differ per avatar.** Fish `reference_id`s are populated for all 7 (the values in
+   `lib/avatars.ts` were filled in by hand from fish.audio/voice-library; two were
+   verified live to return distinct audio). `/api/speak` echoes the id used.
+4. **Speed 0.75× / 1× / 1.5× / 2×** — segmented control; implemented as `audio.playbackRate`
+   (pitch-preserving in modern browsers). Instant, applies to the playing clip, persists in
+   `localStorage`, and keeps the clip cache valid. Lip-sync and word highlight both key off
+   `audio.currentTime`, so they stay in sync at any speed.
+5. **Single-screen storytelling layout**: header (serif title + "Open another PDF"), a stage
+   where the avatar (5:8 panel, full stage height) and the book share the remaining height —
+   `ScaleToFit` now scales to fit height as well as width — and a glass control bar with the
+   compact avatar strip (glowing ring on the selected narrator), ⏮ ▶/⏸ ⏭ transport, page
+   counter, speed pills, voice dropdown and a one-line status. Warm animated background kept.
+
+**Verified**
+- `npm run build` (isolated) clean; `tsc` + `lint` clean; `npm test` → 19 passing
+  (`tests/paginate.test.ts` added: word coverage, line budget, per-PDF-page breaks).
+- Dev server: `/read/new` 200; `/api/speak` for `luna` and `brian` → Fish with their own
+  reference ids and emotion tags.
+- Not verified in a browser: pagination accuracy vs. real font rendering (canvas measurement
+  matches CSS on the same machine; a 36 px padding + 28 px footer margin is reserved),
+  auto-advance feel, speed pitch quality, layout at 1366×768 and phone sizes.
+
+**Files changed**
+- New: `lib/paginate.ts`, `tests/paginate.test.ts`
+- Rewritten: `components/library/ReaderShell.tsx`, `components/book/ScaleToFit.tsx`,
+  `components/avatar/AvatarPicker.tsx`
+- Changed: `app/(reader)/read/[bookId]/page.tsx`, `components/book/BookViewer.tsx`,
+  `components/avatar/VoiceOverride.tsx`, `lib/avatars.ts` (comment), `lib/books/{types,local,supabase}.ts`,
+  `README.md`
+
+**How to verify**
+- Open a long PDF: no page is cut off; page count is larger than the PDF's; the footer
+  shows book page / total.
+- Click an avatar → it reads; when the page ends the book flips itself and continues.
+- Switch avatars mid-sentence → clearly different voice, no overlap.
+- Speed pills: 2× is audibly faster, same pitch, highlight keeps pace.
+- « hides the library; reload keeps it hidden; » brings it back.
+- Everything (header, avatar, book, control bar) fits without scrolling at desktop sizes.
+
+## 2026-09-06 — Demo fixes: sidebar overlap, full pages, avatar-driven voice, portrait thumbnails
+
+**What changed**
+1. **Sidebar no longer overlaps the avatar.** The avatar panel had an unbounded aspect-ratio
+   width, so the stage overflowed under the docked library and past the right edge. It is now
+   a bounded column (`clamp(200px, 26vw, 400px)` on desktop, 30 vh tall on narrow screens)
+   and the stage is `min-w-0 overflow-hidden`; the book scales to whatever is left.
+2. **Pages are full.** `lib/paginate.ts` now flows the whole book as one word stream, so a
+   PDF page break is no longer a book page break (previously each PDF page started a fresh
+   book page, leaving half-empty pages). Empty PDF pages vanish; `source` still records the
+   PDF page of a page's first word. Tests updated (20 passing).
+3. **Voice follows the avatar, always.** The Voice override dropdown pinned a voice (it showed
+   "Luna" while other avatars were selected). Removed `components/avatar/VoiceOverride.tsx`
+   and the override state; the legacy `avatar-reader:voice-override` localStorage key is
+   cleared on load. The `/api/speak` `voiceOverride` parameter still exists for API callers.
+4. **Real portraits in the picker.** All seven `.vrm` files carry an embedded VRM 1.0
+   `meta.thumbnailImage`; extracted them with a small Python script (GLB binary chunk →
+   PNG), downscaled to 256 px with `sips`, saved as `public/avatars/<id>.png`
+   (48–88 KB each). `AvatarPicker` already preferred `<id>.png`, so pictures replace letters
+   with no code change; the letter badge remains only as a fallback for a missing file.
+
+**Verified**
+- `npm run build` (isolated) clean; `tsc` + `lint` clean; `npm test` → 20 passing.
+- Dev server: `/read/new` 200; `/avatars/{alex,luna,sam}.png` 200 `image/png`.
+- Not verified in a browser: the stage layout at your window size, page fill on the real font.
+
+**Files changed**
+- `app/(reader)/read/[bookId]/page.tsx`, `lib/paginate.ts`, `tests/paginate.test.ts`
+- New: `public/avatars/*.png` (7 thumbnails) · Removed: `components/avatar/VoiceOverride.tsx`
+
+**How to verify**
+- Toggle « / » with a book open: the avatar and book stay inside the content column.
+- Every book page is filled to the bottom line (except the last).
+- Click Alex, then Luna, then Sam: the voice changes each time, with no dropdown involved.
+- The narrator strip shows each character's face.
+
+## 2026-09-06 — Read-along highlight actually shows
+
+**Bug**
+- Word highlighting (added in the final-phase pass) never appeared. `react-pageflip` renders
+  its children from a `pages` state copy; with `renderOnlyPageLengthChange` that copy is only
+  refreshed when the page count changes, so the `activeWord` prop never reached the DOM.
+  Dropping the flag would instead rebuild the whole page-flip collection on every word.
+
+**Fix**
+- `BookPage` is now static: each word is `<span data-w={i} class="read-word">`, each page
+  `data-page={i}`. `BookViewer` applies the highlight imperatively in an effect on
+  `highlight`: `.read-word--now` on the spoken word (solid amber, dark text, 2 px glow) and
+  `.read-word--phrase` on every word of the TTS chunk being read (soft amber tint), so
+  listeners can see the phrase the narrator is heading through. Classes are cleared before
+  each update; all DOM copies of a page (page-flip clones one mid-flip) are updated.
+- `WordHighlight` gained `from`/`to`; the reader sets the phrase range the moment a chunk
+  starts (before the first timing tick) and updates `word` from the audio clock.
+- CSS in `app/globals.css`.
+
+**Verified**
+- `npm run build` (isolated) clean; `tsc` + `lint` clean; `npm test` 20 passing.
+- Dev server: `/read/new` 200; compiled `layout.css` contains `read-word--now` /
+  `read-word--phrase`.
+- Not verified in a browser: the visual result and sync feel.
+
+**Files changed**
+- `components/book/BookViewer.tsx`, `app/(reader)/read/[bookId]/page.tsx`, `app/globals.css`

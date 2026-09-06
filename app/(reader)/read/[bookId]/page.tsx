@@ -6,9 +6,9 @@ import { loadBook, loadProgress, saveProgress } from '@/lib/books';
 import { DEFAULT_AVATAR_ID, getAvatar } from '@/lib/avatars';
 import { splitIntoChunks, wordAtFraction, type Chunk } from '@/lib/tts/chunk';
 import { clipKey, getClip, putClip, type Clip } from '@/lib/clip-cache';
+import { paginate, type BookPage } from '@/lib/paginate';
 import { OPEN_UPLOAD_EVENT } from '@/lib/events';
 import AvatarPicker from '@/components/avatar/AvatarPicker';
-import VoiceOverride from '@/components/avatar/VoiceOverride';
 import ScaleToFit from '@/components/book/ScaleToFit';
 import UploadDropzone from '@/components/book/UploadDropzone';
 import type { WordHighlight } from '@/components/book/BookViewer';
@@ -21,7 +21,8 @@ const BookViewer = dynamic(() => import('@/components/book/BookViewer'), { ssr: 
 const AvatarCanvas = dynamic(() => import('@/components/avatar/AvatarCanvas'), { ssr: false });
 
 const AVATAR_STORAGE_KEY = 'avatar-reader:avatar';
-const VOICE_STORAGE_KEY = 'avatar-reader:voice-override';
+const SPEED_STORAGE_KEY = 'avatar-reader:speed';
+const SPEEDS = [0.75, 1, 1.5, 2] as const;
 /** `/read/new` = reader with no book yet; the drop-zone is shown inline. */
 const NEW_BOOK = 'new';
 /** Parallel TTS requests per page. Fish rate-limits aggressive fan-out; 2 keeps it flowing. */
@@ -72,8 +73,15 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
 
   // ----- avatar + voice (source of truth #2: avatarId) -----
   const [avatarId, setAvatarId] = useState<AvatarId>(DEFAULT_AVATAR_ID);
-  const [voiceOverride, setVoiceOverride] = useState('');
+  const voiceOverride = ''; // the selected avatar alone decides the voice
+  const [speed, setSpeed] = useState<number>(1);
   const avatar = getAvatar(avatarId);
+
+  // PDF pages re-flowed into book pages that fit the page box (nothing clipped).
+  const [pages, setPages] = useState<BookPage[]>([]);
+  useEffect(() => {
+    setPages(book ? paginate(book.pages) : []);
+  }, [book]);
 
   // ----- playback -----
   const [status, setStatus] = useState<Status>('idle');
@@ -88,8 +96,8 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
   const runRef = useRef<Run | null>(null);
   const idRef = useRef(0);
 
-  const pageCount = book?.pages.length ?? 0;
-  const pageText = book?.pages[currentPage] ?? '';
+  const pageCount = pages.length;
+  const pageText = pages[currentPage]?.text ?? '';
 
   // ----- load book + saved position (also when the sidebar switches books) -----
   useEffect(() => {
@@ -102,9 +110,8 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
         if (cancelled) return;
         resetPlayback();
         if (b) {
-          const clamped = Math.min(page, Math.max(0, b.pages.length - 1));
-          setCurrentPage(clamped);
-          lastSavedRef.current = clamped;
+          setCurrentPage(page);
+          lastSavedRef.current = page;
         }
         setBook(b);
       } catch (err) {
@@ -120,14 +127,27 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.bookId]);
 
-  // ----- remembered avatar / voice -----
+  useEffect(() => {
+    if (pageCount > 0 && currentPage > pageCount - 1) setCurrentPage(pageCount - 1);
+  }, [pageCount, currentPage]);
+
+  // ----- remembered avatar / voice / speed -----
   useEffect(() => {
     try {
       const saved = localStorage.getItem(AVATAR_STORAGE_KEY);
       if (saved) setAvatarId(getAvatar(saved).id);
-      setVoiceOverride(localStorage.getItem(VOICE_STORAGE_KEY) ?? '');
+      localStorage.removeItem('avatar-reader:voice-override'); // legacy override could pin one voice
+      const sp = Number(localStorage.getItem(SPEED_STORAGE_KEY));
+      if (SPEEDS.includes(sp as (typeof SPEEDS)[number])) setSpeed(sp);
     } catch {}
   }, []);
+
+  // Speed = playbackRate: instant, keeps pitch, and needs no re-synthesis (cache stays valid).
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.playbackRate = speed;
+  }, [speed]);
+  const speedRef = useRef(speed);
+  speedRef.current = speed;
 
   // ----- sidebar "Upload PDF" opens the drop-zone here instead of navigating -----
   useEffect(() => {
@@ -146,19 +166,22 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
 
   useEffect(() => {
     if (!bookId || currentPage === lastSavedRef.current) return;
+    if (pageCount === 0) return;
     const t = setTimeout(() => {
       lastSavedRef.current = currentPage;
-      void saveProgress(bookId, currentPage);
+      void saveProgress(bookId, currentPage, pageCount);
     }, 500);
     return () => clearTimeout(t);
-  }, [bookId, currentPage]);
+  }, [bookId, currentPage, pageCount]);
 
+  const pageCountRef = useRef(pageCount);
+  pageCountRef.current = pageCount;
   useEffect(() => {
     if (!bookId) return;
     const flush = () => {
-      if (currentPageRef.current !== lastSavedRef.current) {
+      if (currentPageRef.current !== lastSavedRef.current && pageCountRef.current > 0) {
         lastSavedRef.current = currentPageRef.current;
-        void saveProgress(bookId, currentPageRef.current);
+        void saveProgress(bookId, currentPageRef.current, pageCountRef.current);
       }
     };
     window.addEventListener('pagehide', flush);
@@ -200,6 +223,7 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
       new Promise<'ended' | 'aborted'>((resolve) => {
         if (run.controller.signal.aborted) return resolve('aborted');
         const audio = new Audio(`data:audio/wav;base64,${clip.audioBase64}`);
+        audio.playbackRate = speedRef.current;
         audio.onplay = () => setStatus('playing');
         audio.onpause = () => {
           if (!audio.ended) setStatus('paused');
@@ -214,6 +238,7 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
 
         audioRef.current = audio; // set before publishing cues so the lip-sync loop reads this element's clock
         currentChunkRef.current = { chunk, page };
+        setHighlight({ page, word: chunk.startWord, from: chunk.startWord, to: chunk.startWord + chunk.wordCount });
         setVisemes(clip.visemes);
         setMeta(clip.meta);
         setSpeakError(null);
@@ -234,7 +259,7 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
    * never start playing over what's current, and the next page is prefetched in the background.
    */
   useEffect(() => {
-    if (!book || playRequest === 0) return;
+    if (!book || playRequest === 0 || pageCount === 0) return;
 
     runRef.current?.controller.abort();
     const run: Run = { id: ++idRef.current, controller: new AbortController() };
@@ -296,8 +321,13 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
           const outcome = await playClip(clip, chunks[i], page, run);
           if (outcome === 'aborted' || stale()) return;
         }
-        setStatus('idle');
         setHighlight(null);
+        // Auto-advance: keep reading on the next page until the book ends.
+        if (page + 1 < pageCount) {
+          setCurrentPage(page + 1);
+        } else {
+          setStatus('idle');
+        }
       } catch (err) {
         if (stale()) return;
         setSpeakError(err instanceof Error ? err.message : 'Speech failed');
@@ -307,8 +337,8 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
 
     // Once this page is fully fetched, warm the cache for the next page (same run: cancelled on any change).
     Promise.allSettled(clipPromises).then(async () => {
-      if (stale() || page + 1 >= book.pages.length) return;
-      const nextChunks = splitIntoChunks(book.pages[page + 1]);
+      if (stale() || page + 1 >= pageCount) return;
+      const nextChunks = splitIntoChunks(pages[page + 1].text);
       for (let i = 0; i < nextChunks.length; i++) {
         if (stale()) return;
         await fetchClip(nextChunks[i], i, page + 1).catch(() => {});
@@ -316,7 +346,7 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
     });
 
     return () => run.controller.abort();
-  }, [book, currentPage, pageText, avatarId, voiceOverride, playRequest, stopAudio, playClip]);
+  }, [book, pages, pageCount, currentPage, pageText, avatarId, voiceOverride, playRequest, stopAudio, playClip]);
 
   // Stop everything on unmount.
   useEffect(() => () => resetPlayback(), [resetPlayback]);
@@ -332,7 +362,12 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
         const w = c.chunk.startWord + wordAtFraction(c.chunk.fractions, a.currentTime / a.duration);
         if (w !== last) {
           last = w;
-          setHighlight({ page: c.page, word: w });
+          setHighlight({
+            page: c.page,
+            word: w,
+            from: c.chunk.startWord,
+            to: c.chunk.startWord + c.chunk.wordCount,
+          });
         }
       }
       raf = requestAnimationFrame(tick);
@@ -363,10 +398,10 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
     if (book && playRequest === 0) setPlayRequest(1);
   }
 
-  function changeVoiceOverride(referenceId: string) {
-    setVoiceOverride(referenceId);
+  function changeSpeed(v: number) {
+    setSpeed(v);
     try {
-      localStorage.setItem(VOICE_STORAGE_KEY, referenceId);
+      localStorage.setItem(SPEED_STORAGE_KEY, String(v));
     } catch {}
   }
 
@@ -401,7 +436,7 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
   // ----- render -----
   if (book === undefined) {
     return (
-      <main className="flex min-h-screen items-center justify-center gap-3 text-gray-300">
+      <main className="flex h-full items-center justify-center gap-3 text-gray-300">
         <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/20 border-t-white" />
         Loading book…
       </main>
@@ -410,8 +445,8 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
 
   if (book === null) {
     return (
-      <main className="flex min-h-screen flex-col items-center justify-center gap-6 p-4 sm:p-8">
-        <h1 className="text-2xl font-semibold">Avatar Reader</h1>
+      <main className="flex h-full flex-col items-center justify-center gap-6 p-4 sm:p-8">
+        <h1 className="text-3xl text-amber-50" style={{ fontFamily: "Georgia, 'Times New Roman', serif" }}>Avatar Reader</h1>
         {params.bookId !== NEW_BOOK && (
           <p className="text-sm text-gray-400">{loadError ?? 'That book was not found.'} Load another:</p>
         )}
@@ -422,16 +457,25 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
 
   const canPlay = pageText.trim().length > 0;
   const playLabel =
-    status === 'loading' ? 'Loading…' : status === 'playing' ? '⏸ Pause' : status === 'paused' ? '▶ Resume' : '▶ Play';
+    status === 'loading' ? '…' : status === 'playing' ? '⏸' : '▶';
+  const playTitle =
+    status === 'loading' ? 'Loading' : status === 'playing' ? 'Pause' : status === 'paused' ? 'Resume' : 'Play';
 
   return (
-    <main className="flex min-h-screen flex-col items-center gap-5 p-4 sm:p-8">
-      <div className="flex w-full items-center justify-center gap-4">
-        <h1 className="truncate text-lg font-medium">{book.title ?? 'Untitled'}</h1>
-        <button type="button" onClick={() => setShowUpload(true)} className="shrink-0 text-xs text-gray-400 underline">
+    <main className="flex h-full min-h-0 flex-col">
+      {/* header */}
+      <header className="flex shrink-0 items-center justify-center gap-4 px-14 pt-3 pb-1">
+        <h1
+          className="truncate text-xl text-amber-50/95"
+          style={{ fontFamily: "Georgia, 'Times New Roman', serif", letterSpacing: '0.01em' }}
+          title={book.title ?? undefined}
+        >
+          {book.title ?? 'Untitled'}
+        </h1>
+        <button type="button" onClick={() => setShowUpload(true)} className="shrink-0 text-xs text-amber-100/60 underline-offset-2 hover:text-amber-100 hover:underline">
           Open another PDF
         </button>
-      </div>
+      </header>
 
       {showUpload && (
         <div
@@ -444,78 +488,112 @@ export default function ReadPage({ params }: { params: { bookId: string } }) {
         </div>
       )}
 
-      <div className="flex w-full flex-col items-center gap-5 xl:flex-row xl:items-start xl:justify-center">
-        <AvatarCanvas
-          avatar={avatar}
-          visemes={visemes}
-          audioRef={audioRef}
-          className="h-[360px] w-full max-w-[360px] shrink-0 rounded-2xl bg-black/30 xl:h-[640px] xl:w-[400px] xl:max-w-none"
-        />
-        {/* react-pageflip needs fixed pixel dimensions; scale the whole book down on narrow screens */}
-        <ScaleToFit pageWidth={480} pageHeight={640}>
-          {(orientation) => (
-            <BookViewer
-              pages={book.pages}
-              currentPage={currentPage}
-              onFlip={setCurrentPage}
-              highlight={highlight}
-              orientation={orientation}
-            />
-          )}
-        </ScaleToFit>
-      </div>
+      {/* stage: avatar + book share the remaining height */}
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col items-center gap-3 overflow-hidden px-3 pb-2 sm:px-6 lg:flex-row lg:items-stretch lg:justify-center lg:gap-6">
+        <div className="flex h-[30vh] w-full shrink-0 justify-center lg:h-full lg:w-[clamp(200px,26vw,400px)]">
+          <AvatarCanvas
+            avatar={avatar}
+            visemes={visemes}
+            audioRef={audioRef}
+            className="h-full w-full max-w-[min(100%,calc(30vh*0.625))] overflow-hidden rounded-3xl bg-black/30 shadow-[0_20px_60px_rgba(0,0,0,.45)] ring-1 ring-white/10 lg:max-w-none"
+          />
+        </div>
+        <div className="min-h-0 min-w-0 w-full flex-1 lg:max-w-[960px]">
+          {/* react-pageflip needs fixed pixel dimensions; scale the whole book to fit the stage */}
+          <ScaleToFit pageWidth={480} pageHeight={640}>
+            {(orientation) => (
+              <div className="shadow-[0_30px_80px_rgba(0,0,0,.55)]">
+                <BookViewer
+                  pages={pages.map((p) => p.text)}
+                  currentPage={currentPage}
+                  onFlip={setCurrentPage}
+                  highlight={highlight}
+                  orientation={orientation}
+                />
+              </div>
+            )}
+          </ScaleToFit>
+        </div>
+      </section>
 
-      <AvatarPicker selectedId={avatarId} onSelect={selectAvatar} />
+      {/* control bar */}
+      <footer className="shrink-0 border-t border-white/10 bg-black/40 px-3 py-2 backdrop-blur-md">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-center gap-x-6 gap-y-2">
+          <AvatarPicker selectedId={avatarId} onSelect={selectAvatar} />
 
-      <div className="flex flex-wrap items-center justify-center gap-3">
-        <button onClick={goPrev} disabled={currentPage === 0} className="rounded bg-white/10 px-4 py-2 disabled:opacity-40">
-          ← Prev
-        </button>
-        <span className="tabular-nums text-sm text-gray-300">
-          Page {currentPage + 1} of {pageCount}
-        </span>
-        <button
-          onClick={goNext}
-          disabled={currentPage >= pageCount - 1}
-          className="rounded bg-white/10 px-4 py-2 disabled:opacity-40"
-        >
-          Next →
-        </button>
-        <button
-          onClick={togglePlay}
-          disabled={!canPlay}
-          aria-pressed={status === 'playing'}
-          className="min-w-32 rounded bg-emerald-600 px-5 py-2 font-medium hover:bg-emerald-500 disabled:opacity-40"
-        >
-          {canPlay ? playLabel : 'No text on this page'}
-        </button>
-      </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={goPrev}
+              disabled={currentPage === 0}
+              title="Previous page (←)"
+              className="h-10 w-10 rounded-full bg-white/10 text-lg hover:bg-white/20 disabled:opacity-30"
+            >
+              ⏮
+            </button>
+            <button
+              onClick={togglePlay}
+              disabled={!canPlay}
+              title={canPlay ? `${playTitle} (space)` : 'No text on this page'}
+              aria-pressed={status === 'playing'}
+              className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-500 text-xl text-black shadow-[0_0_24px_rgba(52,211,153,.45)] hover:bg-emerald-400 disabled:opacity-30"
+            >
+              {status === 'loading' ? (
+                <span className="h-5 w-5 animate-spin rounded-full border-2 border-black/20 border-t-black" />
+              ) : (
+                playLabel
+              )}
+            </button>
+            <button
+              onClick={goNext}
+              disabled={currentPage >= pageCount - 1}
+              title="Next page (→)"
+              className="h-10 w-10 rounded-full bg-white/10 text-lg hover:bg-white/20 disabled:opacity-30"
+            >
+              ⏭
+            </button>
+            <span className="ml-1 w-24 text-center text-xs tabular-nums text-gray-300">
+              Page {currentPage + 1} / {pageCount}
+            </span>
+          </div>
 
-      <div className="flex flex-col items-center gap-2">
-        {status === 'loading' && progress && (
-          <span className="flex items-center gap-2 text-xs text-gray-400">
-            <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/20 border-t-white" />
-            Preparing audio {Math.min(progress.ready + 1, progress.total)}/{progress.total}
-          </span>
-        )}
-        <VoiceOverride value={voiceOverride} onChange={changeVoiceOverride} />
-        {meta && status !== 'error' && (
-          <span className="text-xs text-gray-500">
-            {getAvatar(meta.avatarId).name} ·{' '}
-            {meta.engineUsed === 'fish'
-              ? `Fish Audio${meta.emotionTag ? ` · ${meta.emotionTag}` : ''}`
-              : 'Piper (local)'}
-          </span>
-        )}
+          <div className="flex items-center gap-1 rounded-full bg-white/10 p-1" role="radiogroup" aria-label="Speed">
+            {SPEEDS.map((v) => (
+              <button
+                key={v}
+                role="radio"
+                aria-checked={speed === v}
+                onClick={() => changeSpeed(v)}
+                className={`rounded-full px-2.5 py-1 text-xs tabular-nums transition ${
+                  speed === v ? 'bg-white text-black' : 'text-gray-300 hover:bg-white/10'
+                }`}
+              >
+                {v}×
+              </button>
+            ))}
+          </div>
+
+          <div className="flex flex-col items-center gap-1">
+            <span className="h-4 text-[11px] text-gray-500">
+              {status === 'loading' && progress
+                ? `Preparing audio ${Math.min(progress.ready + 1, progress.total)}/${progress.total}`
+                : meta && status !== 'error'
+                  ? `${getAvatar(meta.avatarId).name} · ${meta.engineUsed === 'fish' ? 'Fish Audio' : 'Piper'}${
+                      meta.emotionTag ? ` · ${meta.emotionTag}` : ''
+                    }`
+                  : ''}
+            </span>
+          </div>
+        </div>
+
         {status === 'error' && speakError && (
-          <div className="flex max-w-md flex-col items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-center text-sm text-red-200">
-            <span>{speakError}</span>
-            <button onClick={() => setPlayRequest((n) => n + 1)} className="rounded bg-red-500/30 px-3 py-1 text-xs">
+          <div className="mx-auto mt-2 flex max-w-xl items-center justify-center gap-3 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-center text-xs text-red-200">
+            <span className="truncate" title={speakError}>{speakError}</span>
+            <button onClick={() => setPlayRequest((n) => n + 1)} className="shrink-0 rounded bg-red-500/30 px-2 py-1">
               Retry
             </button>
           </div>
         )}
-      </div>
+      </footer>
     </main>
   );
 }

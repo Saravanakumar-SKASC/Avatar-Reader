@@ -6,5 +6,6 @@ export interface BookStore {
   loadBook(id: string): Promise<LoadedBook | null>;
   /** 0-based index of the page the user was last on. */
   loadProgress(bookId: string): Promise<number>;
-  saveProgress(bookId: string, pageIndex: number): Promise<void>;
+  /** `pageCount` is the re-flowed book page count, so progress % stays accurate. */
+  saveProgress(bookId: string, pageIndex: number, pageCount: number): Promise<void>;
 }

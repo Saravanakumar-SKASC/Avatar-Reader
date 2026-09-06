@@ -65,3 +65,12 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .warm-bg::before, .warm-bg::after { animation: none; }
 }
+
+/* Read-along highlight (applied imperatively by BookViewer). */
+.read-word { border-radius: 3px; transition: background-color 120ms ease, color 120ms ease; }
+.read-word--phrase { background-color: rgba(251, 191, 36, 0.18); }
+.read-word--now {
+  background-color: rgba(251, 191, 36, 0.95);
+  color: #1c1917;
+  box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.95);
+}
