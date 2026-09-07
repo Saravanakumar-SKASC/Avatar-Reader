@@ -107,6 +107,3 @@ npm start        # serve the build
 npm test         # vitest
 ```
 
-## Project log
-
-`PROGRESS.md` records every phase: what was built, files touched, how to verify.
