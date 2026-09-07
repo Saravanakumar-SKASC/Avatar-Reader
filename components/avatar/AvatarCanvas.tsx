@@ -8,21 +8,22 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { VRM, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm';
 import type { Avatar } from '@/types/avatar';
 import type { Viseme } from '@/types/tts';
-import { useBlink } from './useBlink';
-import { useLipSync, type LipSyncSource } from './useLipSync';
+import { createBlinkDriver, useBlink, type FrameDriver } from './useBlink';
+import { createLipSyncDriver, useLipSync, type LipSyncDriver, type LipSyncSource } from './useLipSync';
 import { MOUTH_OPENNESS } from './lipsync';
-import { useEmotion, type EmotionSource } from './useEmotion';
+import { createEmotionDriver, useEmotion, type EmotionDriver, type EmotionSource } from './useEmotion';
+import { createMotionDriver, type MotionDriver } from './motion';
+import { EMOTIONS } from '@/lib/emotion/types';
 import type { EmotionCue } from '@/lib/emotion/types';
 
-/** Subtle breathing bob + sway so the avatar never looks frozen. */
-function useIdle(group: React.RefObject<THREE.Group>) {
+/** Placeholder-only: rotation micro-sway (no position bounce). The VRM uses the motion driver instead. */
+function useSway(group: React.RefObject<THREE.Group>) {
   useFrame(({ clock }) => {
     const g = group.current;
     if (!g) return;
     const t = clock.getElapsedTime();
-    g.position.y = Math.sin(t * 1.4) * 0.008;
-    g.rotation.y = Math.sin(t * 0.45) * 0.03;
-    g.rotation.z = Math.sin(t * 0.7) * 0.005;
+    g.rotation.y = 0.03 * Math.sin(t * 0.45);
+    g.rotation.x = 0.008 * Math.sin(t * 0.9 + 1);
   });
 }
 
@@ -59,20 +60,52 @@ function eyeHeight(vrm: VRM): number {
 function VrmModel({ vrm, lipSync, emotion }: { vrm: VRM; lipSync: LipSyncSource; emotion: EmotionSource }) {
   const group = useRef<THREE.Group>(null);
   const [headY] = useState(() => eyeHeight(vrm));
-  useIdle(group);
 
-  useBlink((w) => vrm.expressionManager?.setValue('blink', w));
-  useLipSync(lipSync, (shape, w) => vrm.expressionManager?.setValue(shape, w));
-  // Mood layer: happy/angry/sad/relaxed/surprised, capped at 0.6 so the mouth shapes stay readable.
-  useEmotion(emotion, (e, w) => vrm.expressionManager?.setValue(e, w));
+  // One set of drivers per loaded VRM, all stepped from the single frame callback below.
+  const drivers = useRef<{ blink: FrameDriver; lips: LipSyncDriver; mood: EmotionDriver; motion: MotionDriver } | null>(null);
+  if (!drivers.current) {
+    const em = vrm.expressionManager;
+    drivers.current = {
+      blink: createBlinkDriver((w) => em?.setValue('blink', w)),
+      lips: createLipSyncDriver(lipSync, (shape, w) => em?.setValue(shape, w)),
+      mood: createEmotionDriver(emotion),
+      motion: createMotionDriver(vrm, {
+        // Book sits screen-right of the avatar, a little below eye level; viewer is the camera.
+        bookPoint: new THREE.Vector3(0.7, headY - 0.3, 0.9),
+        viewerPoint: new THREE.Vector3(0, headY, 2.2),
+      }),
+    };
+    if (vrm.lookAt) vrm.lookAt.target = drivers.current.motion.lookTarget;
+  }
+  // Keep the drivers' inputs fresh without re-creating them.
+  drivers.current.lips.source = lipSync;
+  drivers.current.mood.source = emotion;
 
-  // Must run after the blink/lip-sync frames above: vrm.update applies expression weights.
-  useFrame((_, delta) => vrm.update(delta));
+  // THE frame loop: visemes, blink, emotion timeline, then natural motion — in that order —
+  // followed by vrm.update, which applies expression weights and the lookAt.
+  useFrame(({ clock }, delta) => {
+    const d = drivers.current!;
+    const t = clock.getElapsedTime();
+    const audio = lipSync.audioRef.current;
+    const playing = !!audio && !audio.paused && !audio.ended;
+
+    d.blink.step(delta, t);
+    d.lips.step(delta, t);
+    d.mood.step(delta, t);
+    const smile = d.motion.step(delta, t, playing);
+
+    const em = vrm.expressionManager;
+    for (const e of EMOTIONS) em?.setValue(e, e === 'happy' ? Math.min(1, d.mood.weights[e] + smile) : d.mood.weights[e]);
+
+    vrm.update(delta);
+  });
 
   return (
     <>
       <FaceCamera headY={headY} distance={0.9} />
       <primitive ref={group} object={vrm.scene} />
+      {/* real gaze target in the scene graph, driven by the motion driver */}
+      <primitive object={drivers.current.motion.lookTarget} />
     </>
   );
 }
@@ -94,7 +127,7 @@ function PlaceholderModel({
   const mouth = useRef<THREE.Mesh>(null);
   const mouthWeights = useRef<Record<string, number>>({});
   const brows = useRef<THREE.Group>(null);
-  useIdle(group);
+  useSway(group);
 
   // Placeholder mood: brows tilt (angry / sad) or lift (surprised).
   useEmotion(emotion, (e, w) => {

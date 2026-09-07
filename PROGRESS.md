@@ -923,3 +923,61 @@ work; the change here is replacing *estimated* word timing with *measured* timin
 - Play a page: the amber word should now land exactly on the spoken word, including the
   pause after full stops. Change speed to 2×: still in step (timings are in media time).
 - Set `WORD_TIMESTAMPS=off`, restart, clear cache, play: highlight reverts to the estimate.
+
+## 2026-09-06 — Natural, state-aware avatar motion (replaces the Y-bounce idle)
+
+**Note:** the prompt referenced four pasted code blocks that did not arrive; written to the
+stated spec.
+
+**Removed**
+- The bounce: `useIdle` in `AvatarCanvas.tsx` animated `group.position.y` with a sine wave
+  (plus a small yaw/roll sway) on the whole model. Gone. The placeholder figure keeps a
+  rotation-only `useSway` (no position change) since it has no bones.
+
+**One loop.** `VrmModel` now has a single `useFrame` callback. The existing blink, lip-sync and
+emotion hooks were refactored into driver factories (`createBlinkDriver`, `createLipSyncDriver`,
+`createEmotionDriver` — logic unchanged, the hook forms remain for the placeholder) and are
+stepped in order: blink → visemes → emotion timeline → motion → `vrm.update(delta)`.
+`playing = audio && !paused && !ended`; `idle = !playing`.
+
+**`components/avatar/motion.ts › createMotionDriver(vrm, { bookPoint, viewerPoint })`**
+1. **Rest pose captured once** for hips, spine, chest, upperChest, neck, head, both shoulders
+   (`getNormalizedBoneNode(...).quaternion.clone()`). Every frame sets
+   `bone.quaternion = rest × offset(euler)` — relative to rest, never accumulated, so a long
+   session cannot drift (test: 10 simulated minutes, head stays within micro-movement range).
+2. **Always on:** breathing — chest/upperChest/spine pitch on a 4.3 s sine with a matching
+   shoulder rise; head micro-movement — layered sines on yaw (0.61 + 1.93 Hz), pitch
+   (0.87 + 2.41 Hz), roll (0.47 Hz), amplitudes ≤ 0.022 rad, 40 % echoed on the neck.
+   A per-instance random phase keeps multiple avatars from moving in unison.
+3. **Gaze:** a real `THREE.Object3D` (`lookTarget`, mounted in the scene via `<primitive>`)
+   assigned to `vrm.lookAt.target`. Reading → eases to `bookPoint` (screen-right of the
+   avatar, a little below eye level). Idle → picks a random point near the viewer (±0.45 m x,
+   ±0.2 m y/z), 30 % of the time straight at the viewer, holds 2–6 s, then re-rolls.
+   Position lerp `delta·2.5`.
+4. **Idle-only gestures** every 10–25 s: head tilt (0.14 rad roll + slight nod), shoulder roll
+   (0.09 rad), or micro-smile (up to 0.3 on `happy`, *added* to the emotion driver's weight —
+   the emotion driver now returns weights instead of applying them so the two layers can sum).
+   Each is a 2.2 s smooth bump. If playback starts mid-gesture the gesture fades out over
+   ~0.17 s; the countdown pauses while reading. Test: zero smile over 2 simulated minutes of
+   playback.
+
+**Verified**
+- `npm run build` (isolated) clean; `tsc` + `lint` clean; `npm test` → 37 passing
+  (`tests/motion.test.ts`: no drift over 10 min, no gestures while playing, gaze targets).
+- Dev server: `/read/new` 200.
+- Not verified in a browser: the feel of the amplitudes on your VRMs (all constants are at the
+  top of `motion.ts`), and whether `bookPoint` reads as "looking at the book" from your camera.
+
+**Files changed**
+- New: `components/avatar/motion.ts`, `tests/motion.test.ts`
+- Rewritten: `components/avatar/useBlink.ts`, `components/avatar/useLipSync.ts`,
+  `components/avatar/useEmotion.ts` (same behaviour, driver + hook forms)
+- Changed: `components/avatar/AvatarCanvas.tsx`
+
+**How to test**
+- Idle on a page: no vertical bobbing; a slow breath in the chest, tiny head drift, eyes
+  wandering and occasionally meeting yours; every 10–25 s a tilt, a shoulder roll or a small
+  smile.
+- Press Play: eyes settle toward the book; breathing and micro-movement continue; no
+  tilts/smiles while speaking. Pause: gestures resume after ≥10 s.
+- Leave it running 10+ minutes: the pose is unchanged.
