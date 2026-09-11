@@ -21,6 +21,18 @@ describe('computeMetrics (mirrors page-flip stretch sizing)', () => {
     expect(m.blockWidth).toBe(600);
     expect(m.pageWidth).toBe(600);
   });
+  it('keeps the spread when a height-limited block still clears the threshold', () => {
+    // 900x553 fits two 415-wide pages (830 total) — it must not collapse to one page.
+    const m = computeMetrics(900, 553);
+    expect(m.orientation).toBe('landscape');
+    expect(m.blockWidth).toBeGreaterThan(2 * PAGE.minWidth);
+    expect(m.pageHeight).toBe(553);
+  });
+  it('goes portrait when the fitted spread would be too narrow, not when the stage is', () => {
+    // Wide but very short: a spread would be under 2*minWidth, so one page is right.
+    const m = computeMetrics(900, 180);
+    expect(m.orientation).toBe('portrait');
+  });
   it('caps page width at maxWidth', () => {
     const m = computeMetrics(4000, 4000);
     expect(m.pageWidth).toBe(PAGE.maxWidth);

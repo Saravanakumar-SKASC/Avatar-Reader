@@ -15,7 +15,7 @@ async function load() {
   const ok = await appReachable();
   offline.hidden = ok;
   frame.hidden = !ok;
-  if (ok) frame.src = APP_URL + '/read/new';
+  if (ok) frame.src = APP_URL + '/';
 }
 
 document.getElementById('reload').addEventListener('click', load);

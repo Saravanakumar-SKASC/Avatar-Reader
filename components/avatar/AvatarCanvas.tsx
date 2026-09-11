@@ -37,8 +37,8 @@ function FaceCamera({ headY, distance }: { headY: number; distance: number }) {
   const camera = useThree((s) => s.camera);
   useEffect(() => {
     // Eye line sits a little above centre; shoulders fill the lower third.
-    camera.position.set(0, headY - 0.02, distance);
-    camera.lookAt(0, headY - 0.07, 0);
+    camera.position.set(0, headY - 0.04, distance);
+    camera.lookAt(0, headY - 0.12, 0); // a little headroom above hair/ears
     camera.updateProjectionMatrix();
   }, [camera, headY, distance]);
   return null;
@@ -102,7 +102,7 @@ function VrmModel({ vrm, lipSync, emotion }: { vrm: VRM; lipSync: LipSyncSource;
 
   return (
     <>
-      <FaceCamera headY={headY} distance={0.9} />
+      <FaceCamera headY={headY} distance={1.15} />
       <primitive ref={group} object={vrm.scene} />
       {/* real gaze target in the scene graph, driven by the motion driver */}
       <primitive object={drivers.current.motion.lookTarget} />
@@ -156,7 +156,7 @@ function PlaceholderModel({
 
   return (
     <group ref={group}>
-      <FaceCamera headY={1.4} distance={1.6} />
+      <FaceCamera headY={1.4} distance={1.9} />
       {/* body */}
       <mesh position={[0, 0.55, 0]}>
         <boxGeometry args={[0.7, 0.9, 0.4]} />

@@ -8,6 +8,21 @@ page-flipping book. Seven avatars, each with its own voice and personality.
 - **TTS**: Fish Audio (primary, REST) with **Piper** (self-hosted) fallback · **Lip-sync**: Rhubarb
 - **Persistence**: local mode (browser storage, default) or Supabase (auth + DB + Storage)
 
+## The app
+
+| Route | What it is |
+|---|---|
+| `/login` | Sign-in screen. Local mode: name + emoji reader profile (no password). Cloud mode: Supabase email / Google |
+| `/` | Home — continue reading, the narrator line-up, your library |
+| `/library` | Grid of books with progress, search, add PDF, edit title/author, remove |
+| `/read/[bookId]` | The reader: flip-book, 3D narrator, player bar, contents, bookmarks |
+| `/bookmarks` | Saved pages, jump straight back in |
+| `/history` | Recently opened books with progress |
+| `/settings` | Profile, text size, auto-advance, captions, default narrator, cache |
+| `/subscriptions` | Plan comparison (Premium is a placeholder — nothing is charged) |
+
+Every page sits in one shell: branded sidebar, My Library list, premium card, collapsible.
+
 ## Quick start (local mode, no accounts)
 
 ```bash

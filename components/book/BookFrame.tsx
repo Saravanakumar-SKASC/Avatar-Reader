@@ -12,9 +12,12 @@ export { PAGE, computeMetrics, type BookMetrics, type Orientation };
  */
 export default function BookFrame({
   className,
+  style,
   children,
 }: {
   className?: string;
+  /** Merged onto the frame element — use it for inherited CSS variables. */
+  style?: React.CSSProperties;
   children: (metrics: BookMetrics) => ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -41,7 +44,9 @@ export default function BookFrame({
             {
               width: metrics.blockWidth,
               height: metrics.blockHeight,
+              // Starting estimate; BookViewer replaces it with the page's measured size.
               '--page-scale': metrics.pageWidth / PAGE.width,
+              ...style,
             } as React.CSSProperties
           }
         >

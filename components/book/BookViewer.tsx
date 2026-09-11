@@ -147,6 +147,58 @@ export default function BookViewer({
     bookRef.current?.pageFlip()?.update();
   }, [metrics.blockWidth, metrics.blockHeight]);
 
+  /**
+   * page-flip sizes its pages from its own container's offsetWidth/Height, so the page can end
+   * up a different size than we predicted. Measure a real page and drive `--page-scale` from it.
+   *
+   * Timing matters: right after mount (and after page-flip rebuilds its items) a `.leaf` can be
+   * momentarily un-sized, and latching onto that wrong width is what rendered the text at full
+   * size and sliced it at the spine. So: re-query the leaf every time, ignore implausible
+   * readings, re-check on a few frames, and watch for both resizes and DOM swaps.
+   */
+  useEffect(() => {
+    const root = wrapRef.current;
+    if (!root) return;
+    let frame = 0;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    let leafObserved: Element | null = null;
+    const ro = new ResizeObserver(() => schedule());
+    const mo = new MutationObserver(() => schedule());
+
+    const measure = () => {
+      // Always re-query: page-flip replaces its item elements.
+      const leaf = root.querySelector<HTMLElement>('.leaf');
+      if (!leaf) return;
+      if (leaf !== leafObserved) {
+        if (leafObserved) ro.unobserve(leafObserved);
+        ro.observe(leaf);
+        leafObserved = leaf;
+      }
+      const w = leaf.clientWidth;
+      // A page narrower than a third of the design width, or wider than the frame, is a
+      // half-laid-out reading — keep the predicted scale until it settles.
+      const plausible = w > PAGE.width / 3 && w <= metrics.blockWidth + 2;
+      if (plausible) root.style.setProperty('--page-scale', String(w / PAGE.width));
+      else root.style.removeProperty('--page-scale');
+    };
+    const schedule = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(measure);
+    };
+
+    schedule();
+    for (const ms of [60, 200, 600]) timers.push(setTimeout(schedule, ms));
+    ro.observe(root);
+    mo.observe(root, { childList: true, subtree: true });
+
+    return () => {
+      cancelAnimationFrame(frame);
+      for (const t of timers) clearTimeout(t);
+      ro.disconnect();
+      mo.disconnect();
+    };
+  }, [metrics.blockWidth, metrics.blockHeight, metrics.orientation, pages.length]);
+
   // Read-along highlight, applied straight to the DOM (page-flip clones a page mid-flip;
   // every matching node gets the classes).
   useEffect(() => {

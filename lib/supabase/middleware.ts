@@ -2,17 +2,27 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 import { isLocalMode, SUPABASE_ANON_KEY, SUPABASE_URL } from './env';
 
-const PROTECTED_PREFIXES = ['/upload', '/read'];
+const PROTECTED_PREFIXES = ['/', '/upload', '/read', '/library', '/bookmarks', '/history', '/settings', '/subscriptions'];
+const PROFILE_COOKIE = 'ar-profile';
 
 /** Refreshes the auth cookie on every request and gates the reader pages behind sign-in. */
 export async function updateSession(request: NextRequest) {
   let response = NextResponse.next({ request });
 
   if (isLocalMode()) {
-    // No accounts in local mode; /login has nothing to do.
-    if (request.nextUrl.pathname === '/login') {
+    // Local mode: a lightweight reader profile (cookie set by /login) gates the app.
+    const { pathname } = request.nextUrl;
+    const hasProfile = !!request.cookies.get(PROFILE_COOKIE)?.value;
+    const isProtected = PROTECTED_PREFIXES.some((p) => pathname === p || (p !== '/' && pathname.startsWith(p + '/')));
+    if (!hasProfile && isProtected) {
       const url = request.nextUrl.clone();
-      url.pathname = '/read/new';
+      url.pathname = '/login';
+      url.search = pathname === '/' ? '' : `?next=${encodeURIComponent(pathname)}`;
+      return NextResponse.redirect(url);
+    }
+    if (hasProfile && pathname === '/login') {
+      const url = request.nextUrl.clone();
+      url.pathname = '/';
       url.search = '';
       return NextResponse.redirect(url);
     }
@@ -38,7 +48,7 @@ export async function updateSession(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const { pathname } = request.nextUrl;
-  const isProtected = PROTECTED_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + '/'));
+  const isProtected = PROTECTED_PREFIXES.some((p) => pathname === p || (p !== '/' && pathname.startsWith(p + '/')));
 
   if (!user && isProtected) {
     const url = request.nextUrl.clone();
@@ -48,7 +58,7 @@ export async function updateSession(request: NextRequest) {
   }
   if (user && pathname === '/login') {
     const url = request.nextUrl.clone();
-    url.pathname = '/read/new';
+    url.pathname = '/';
     url.search = '';
     return NextResponse.redirect(url);
   }
